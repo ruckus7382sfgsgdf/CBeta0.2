@@ -83,7 +83,7 @@ To build from a clone instead:
    `tools\third_party` into `third_party\` and `tools\work` into `work\`.
 4. Run everything with `python -I` from the repository root.
 
-(Some environment variables still carry the older `HOOKSHOT_` name; they work as documented.)
+(Some environment variables still carry the older `HOOKSHOT_` name; they work as documented.).
 
 ### Triforce Setup
 
