@@ -1,0 +1,28 @@
+#version 450
+// (Triforce) What the GPU drew into a small texture, written into the texture's storage in guest memory as the console's GPU
+// would have left it there (vk_texture.cpp, texture_end_recording). The image's levels and layers were copied into `lin`,
+// row by row; `sto` holds the storage as guest memory has it now; `map` says, for each unit of the storage (a unit is one
+// block: 1, 2, 4, 8 or 16 bytes), where in `lin` its bytes are, or 0xffffffff where the storage holds no texel (the padding of
+// the block-linear layout, which stays as it was). The map is made on the CPU with the same swizzle the uploads undo, so
+// this shader knows nothing of the layout. One invocation a 32-bit word of the storage: no two write the same word.
+layout(local_size_x = 64) in;
+layout(std430, binding = 0) readonly buffer Map { uint map[]; };
+layout(std430, binding = 1) readonly buffer Lin { uint lin[]; };
+layout(std430, binding = 2) buffer Sto { uint sto[]; };
+layout(push_constant) uniform P { uint words; uint unit_shift; } pc;
+
+uint lin_byte(uint at) { return (lin[at >> 2] >> ((at & 3u) * 8u)) & 0xffu; }
+
+void main() {
+    const uint w = gl_GlobalInvocationID.x;
+    if (w >= pc.words) return;
+    const uint unit_mask = (1u << pc.unit_shift) - 1u;
+    uint v = sto[w];
+    for (uint b = 0u; b < 4u; b++) {
+        const uint at = w * 4u + b;
+        const uint from = map[at >> pc.unit_shift];
+        if (from == 0xffffffffu) continue;
+        v = (v & ~(0xffu << (b * 8u))) | (lin_byte(from + (at & unit_mask)) << (b * 8u));
+    }
+    sto[w] = v;
+}

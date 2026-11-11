@@ -1,0 +1,209 @@
+"""Compile actual swapchain lifecycle/selection statements with CPU Vulkan stubs.
+Usage: python -I -B tests/test_present_semaphores.py [--cxx clang++]
+Checks per-image ownership and recovery from recreation failures. No GPU.
+"""
+import argparse
+from pathlib import Path
+import re
+import subprocess
+import tempfile
+
+p = argparse.ArgumentParser(description=__doc__)
+p.add_argument('--source', type=Path, default=Path(__file__).resolve().parents[1])
+p.add_argument('--cxx', default='clang++')
+a = p.parse_args()
+source = a.source.resolve()
+main = (source/'gpu/vk/vk_main.cpp').read_text()
+replay = (source/'gpu/vk/vk_replay.cpp').read_text()
+start = replay.index('void present_image(')
+# Read the complete top-level function; capture dependencies can grow its text.
+present = replay[start:replay.index('\n}', start) + 2]
+signal = re.search(r'    signal\.semaphore = [^;]+;', present)[0]
+wait = re.search(r'    pi\.pWaitSemaphores = [^;]+;', present)[0]
+acquire_wait = re.search(r'    waits\[0\]\.semaphore = [^;]+;', present)[0]
+assert 'acquire_timeout, f.acquired, VK_NULL_HANDLE, &index)' in present
+# Include the actual creation attempt: passing oldSwapchain retires it even on failure.
+start = main.index('    ci.oldSwapchain = dev.swapchain;')
+end = main.index('    logf("vk: swapchain', start)
+tail = main[start:end]
+begin = present[present.index('{') + 1:present.index('    if (src) {')]
+reflex = (source/'gpu/vk/vk_reflex.cpp').read_text()
+reset_start = reflex.index('void reflex_swapchain_destroyed(') if 'void reflex_swapchain_destroyed(' in reflex else -1
+reset = reflex[reset_start:reflex.index('\n}', reset_start)+2] if reset_start >= 0 else 'void reflex_swapchain_destroyed() {}'
+fixture = r'''
+#include <vector>
+#include <set>
+#include <cstdint>
+#include <cstdio>
+#include <utility>
+#include <atomic>
+#include <mutex>
+using VkSemaphore=uint64_t; using VkImage=uint64_t; using VkSwapchainKHR=uint64_t; using VkResult=int;
+constexpr uint64_t VK_NULL_HANDLE=0;
+constexpr int VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO=1, VK_SUCCESS=0;
+constexpr int VK_PRESENT_MODE_MAILBOX_KHR=1, VK_PRESENT_MODE_IMMEDIATE_KHR=2;
+struct VkSemaphoreCreateInfo { int type; };
+struct Extent { uint32_t width,height; };
+struct Device { int device=1;uint64_t swapchain=0;int swap_format=0;Extent swap_extent{};bool swap_mutable=false;
+    std::vector<VkImage> swap_images;std::vector<VkSemaphore> swap_rendered;
+    std::atomic<uint64_t> swap_resize{0};std::mutex present_mu; } dev;
+struct { int hdr=0; } opts;   // (the Insert menu's HDR row: present_image remakes the swapchain when it changes)
+unsigned image_count=4, made=0, fail_at=0;uint64_t serial=1000;
+int query_result=0,data_result=0;uint64_t destroyed_swapchain=0;
+bool idle=false, bad_destroy=false; std::set<uint64_t> live,used;
+std::set<uint64_t> chains, retired;
+uint64_t next_chain=0;int create_result=0;bool bad_chain=false;
+struct CreateInfo {uint64_t oldSwapchain=0;unsigned imageUsage=1,minImageCount=4,flags=0;const void* pNext=nullptr;};
+// (hookshot: the overlays' mutable sRGB swapchain, vk_main.cpp: its format list, never used by these formats)
+using VkFormat=int;
+constexpr int VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO=2, VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT=16,
+    VK_SWAPCHAIN_CREATE_MUTABLE_FORMAT_BIT_KHR=4;
+struct VkImageFormatListCreateInfo {int sType;const void* pNext=nullptr;uint32_t viewFormatCount=0;const VkFormat* pViewFormats=nullptr;};
+VkFormat unorm_of(VkFormat f) {return f;}
+void reflex_swapchain_info(CreateInfo&) {}
+struct Reflex {uint64_t swapchain=0,swapchain_generation=0;bool latency=false,frame_marked=false;int mode=-1;std::mutex mu;} cached;
+Reflex& rx(){return cached;}
+void reflex_swapchain_created(uint64_t sc) {cached.swapchain=sc;cached.latency=cached.frame_marked=true;cached.mode=1;}
+''' + reset + r'''
+template<class... T> void logf(const char*,T...) {}
+int vkCreateSwapchainKHR(int,const CreateInfo* ci,void*,uint64_t* out) {
+    if(ci->oldSwapchain) {
+        if(!chains.count(ci->oldSwapchain) || retired.count(ci->oldSwapchain))bad_chain=true;
+        retired.insert(ci->oldSwapchain); // Vulkan retires oldSwapchain even on creation failure.
+    }
+    if(create_result)return create_result;
+    *out=++next_chain;chains.insert(*out);return 0;
+}
+int vkGetSwapchainImagesKHR(int,uint64_t,uint32_t* n,uint64_t* out) {
+    *n=image_count;if(out)for(unsigned i=0;i<*n;++i)out[i]=i;return out?data_result:query_result;
+}
+int vkCreateSemaphore(int,const VkSemaphoreCreateInfo*,void*,uint64_t* out) {
+    if(++made==fail_at)return -1;*out=++serial;live.insert(*out);return 0;
+}
+void vkDestroySemaphore(int,uint64_t s,void*) {
+    if((used.count(s) && !idle) || !live.erase(s))bad_destroy=true;
+}
+void vkDestroySwapchainKHR(int,uint64_t sc,void*) {
+    if(cached.swapchain==sc)bad_chain=true;
+    if(!chains.erase(sc))bad_chain=true;
+    retired.erase(sc);destroyed_swapchain=sc;
+}
+void queue_flush_locked() {}
+void vkDeviceWaitIdle(int) {idle=true;}
+// (vk_replay.cpp's helper: held submits out, then the device idle; the real one also takes the present queue's own lock)
+void device_wait_idle_locked() {queue_flush_locked();vkDeviceWaitIdle(dev.device);}
+void swap_views_drop() {}   // (hookshot: the overlays' views, vk_main.cpp)
+bool recreate() {
+    uint32_t n=0,width=640,height=480; struct {int format=1;} fmt;
+    CreateInfo ci;int mode=0;VkResult result;
+''' + tail + r'''
+    reflex_swapchain_created(sc);
+    return true;
+}
+uint64_t pack(unsigned w,unsigned h) {return (uint64_t(w)<<32)|h;}
+unsigned called_width=0,called_height=0,acquires=0;
+bool preflight_fail=false,stale=false;uint64_t newer_resize=0;
+bool create_swapchain(unsigned width,unsigned height) {
+    called_width=width;called_height=height;
+    if(newer_resize)dev.swap_resize.store(newer_resize);
+    if(preflight_fail)return false;
+    return recreate();
+}
+bool reflex_swapchain_stale() {return stale;}
+std::mutex present_image_mu;
+void present_begin() {
+''' + begin + r'''
+    if(!dev.swapchain || !chains.count(dev.swapchain) || retired.count(dev.swapchain))bad_chain=true;
+    ++acquires; // The real prefix must return before the frame fence/acquire on failure.
+}
+struct Frame {uint64_t rendered,acquired;};
+uint64_t choose(unsigned index,unsigned frame_slot) {
+    Frame f{100+frame_slot,200+frame_slot};struct{uint64_t semaphore;}signal{};
+    struct{uint64_t semaphore;}waits[1]{};
+    struct{const uint64_t* pWaitSemaphores;}pi{};
+''' + signal + '\n' + wait + '\n' + acquire_wait + r'''
+    if(signal.semaphore!=*pi.pWaitSemaphores)return 0;
+    if(waits[0].semaphore!=200+frame_slot)return 0;
+    used.insert(signal.semaphore);
+    return signal.semaphore;
+}
+int main() {
+    if(!recreate())return 1;
+    uint64_t pending[16]{};unsigned owner[16]{},count=0;
+    // Only reacquiring image i releases its previous presentation wait.
+    unsigned images[]={0,1,2,3,0,1,2,3,3,1,0,2};
+    for(unsigned step=0;step<12;++step) {
+        unsigned image=images[step];
+        for(unsigned j=0;j<count;++j)if(owner[j]==image)pending[j]=0;
+        auto sem=choose(image,step%3);if(!sem)return 2;
+        for(unsigned j=0;j<count;++j)if(pending[j]==sem) {
+            std::printf("FAIL: slot %u reused semaphore for image %u while image %u still owns it\n",step%3,image,owner[j]);return 3;
+        }
+        pending[count]=sem;owner[count++]=image;
+    }
+    if(dev.swap_rendered.size()!=4 || live.size()!=4)return 4;
+    auto old=dev.swap_rendered;image_count=2;idle=false;
+    if(!recreate() || bad_destroy || dev.swap_rendered.size()!=2 || live.size()!=2)return 5;
+    for(auto s:old)if(live.count(s))return 6;
+    for(unsigned slot=0;slot<3;++slot)for(unsigned image=0;image<2;++image)
+        if(choose(image,slot)!=dev.swap_rendered[image])return 9;
+    image_count=5;idle=false;
+    if(!recreate() || bad_destroy || dev.swap_rendered.size()!=5 || live.size()!=5)return 10;
+    for(unsigned image=0;image<5;++image)if(choose(image,image%3)!=dev.swap_rendered[image])return 11;
+    // Once creation has been attempted, the old chain cannot be acquired or used as oldSwapchain again.
+    image_count=4;made=0;fail_at=3;
+    idle=false;
+    if(recreate() || dev.swapchain || !dev.swap_rendered.empty() || !live.empty() || !chains.empty()) {
+        std::puts("FAIL: retired swapchain remains published after semaphore allocation failure");return 7;
+    }
+    fail_at=0;made=0;query_result=-1;destroyed_swapchain=0;
+    if(recreate() || dev.swapchain || made || !live.empty() || !chains.empty())return 12;
+    query_result=0;image_count=0;destroyed_swapchain=0;
+    if(recreate() || dev.swapchain || made || !live.empty() || !chains.empty())return 13;
+    image_count=4;
+    if(!recreate())return 14;
+    create_result=-1;idle=false;
+    if(recreate() || dev.swapchain || !live.empty() || !chains.empty()) {
+        std::puts("FAIL: retired swapchain remains published after creation failure");return 15;
+    }
+    create_result=0;
+    if(!recreate() || !dev.swapchain || dev.swap_images.size()!=4)return 16;
+    data_result=1; // VK_INCOMPLETE from the image-data query must not publish a partial chain.
+    if(recreate() || dev.swapchain || !live.empty() || !chains.empty())return 17;
+    data_result=0;
+    if(!recreate())return 18;
+    dev.swap_resize.store(pack(1720,720));preflight_fail=true;
+    count=acquires;auto active=dev.swapchain;
+    present_begin();
+    if(acquires!=count || dev.swap_resize.load()!=pack(1720,720) || dev.swapchain!=active)return 19;
+    newer_resize=pack(3440,1440);
+    present_begin();
+    if(acquires!=count || dev.swap_resize.load()!=newer_resize)return 20;
+    preflight_fail=false;newer_resize=0;
+    present_begin();
+    if(acquires!=count+1 || called_width!=3440 || called_height!=1440 || dev.swap_resize.load())return 21;
+    create_result=-1;dev.swap_resize.store(pack(1920,1080));count=acquires;
+    present_begin();
+    if(acquires!=count || dev.swapchain || dev.swap_resize.load()!=pack(1920,1080))return 22;
+    create_result=0;present_begin();
+    if(acquires!=count+1 || !dev.swapchain || called_width!=1920)return 23;
+    stale=true;create_result=-1;count=acquires;present_begin();
+    if(acquires!=count || dev.swapchain || !dev.swap_resize.load())return 24;
+    stale=false;create_result=0;dev.swap_resize.store(0);present_begin();
+    if(acquires!=count+1 || !dev.swapchain)return 25; // Null-chain recovery without a resize notification.
+    opts.hdr=1;preflight_fail=true;count=acquires;active=dev.swapchain;present_begin();
+    if(acquires!=count || dev.swapchain!=active || !dev.swap_resize.load())return 27;
+    preflight_fail=false;present_begin();
+    if(acquires!=count+1 || !dev.swapchain || dev.swap_resize.load())return 28;
+    if(bad_destroy || bad_chain)return 8;
+    reflex_swapchain_destroyed();
+    if(cached.swapchain || cached.latency || cached.frame_marked || cached.mode!=-1)return 26;
+    std::puts("PASS: per-image semaphores, retirement, query/allocation/create failures, latest-resize retry and acquire guard");
+}
+'''
+with tempfile.TemporaryDirectory(prefix='present-semaphores-') as directory:
+    folder = Path(directory)
+    cpp, exe = folder/'fixture.cpp', folder/'fixture.exe'
+    cpp.write_text(fixture)
+    subprocess.run([a.cxx, '-std=c++20', '-O1', str(cpp), '-o', str(exe)], check=True)
+    raise SystemExit(subprocess.run([str(exe)]).returncode)

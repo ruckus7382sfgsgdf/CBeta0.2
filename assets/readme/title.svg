@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="640" height="96" viewBox="0 0 640 96"><defs>
+<linearGradient id="t" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#FFF1B8"/><stop offset=".42" stop-color="#E8B840"/><stop offset=".55" stop-color="#B57E1C"/><stop offset="1" stop-color="#F3CF6A"/></linearGradient></defs>
+<text x="320" y="66" text-anchor="middle" font-family="Cinzel, 'Trajan Pro', 'Palatino Linotype', Palatino, 'Book Antiqua', Georgia, serif" font-size="64" font-weight="700" letter-spacing="14" fill="url(#t)" stroke="#5A3A08" stroke-width="1.4" paint-order="stroke">TRIFORCE</text>
+<path d="M150 84h340" stroke="#E0B23E" stroke-opacity=".55" stroke-width="1.2"/>
+<circle cx="296" cy="84" r="3.2" fill="#2FCB3A"/><circle cx="320" cy="84" r="3.2" fill="#E0202E"/><circle cx="344" cy="84" r="3.2" fill="#1E62E8"/></svg>
