@@ -298,8 +298,11 @@ void pool_put(Dead& d) {
 /// presents: destroyed, at most 16 a present (64 while VRAM is short). Returns how many
 size_t pool_trim() {
     std::lock_guard lk(pool_mu);
-    const uint64_t cap = pool_pressed ? 0 : pool_cap();
-    const size_t most = pool_pressed ? 64 : 16;
+    // (Triforce, 11-11: with a floor of blocks kept (target_floor_kept) the pool is not emptied while VRAM is short: what it gave
+    // back went into blocks the floor keeps, the driver's count did not move, and every target of the next frames was made new)
+    const bool give_back = pool_pressed && !target_floor_kept();
+    const uint64_t cap = give_back ? 0 : pool_cap();
+    const size_t most = give_back ? 64 : 16;
     size_t n = 0;
     for (auto it = target_pool.begin(); it != target_pool.end() && n < most;) {
         auto& v = it->second;
@@ -4094,6 +4097,9 @@ uint64_t preset_texture_budget(uint64_t preset_mb, bool preset_applies, bool vra
     return integrated ? std::min(b, own) : b;
 }
 
+uint64_t dead_sweep_next = 0;   // (the present of the next pass for the dead targets between texture_frame's looks; 0: none)
+void texture_sweep(uint64_t completed, bool sweep, uint64_t budget, uint64_t evict_to, bool known, uint64_t used, uint64_t allowed,
+                   bool dead_only);
 void texture_frame(uint64_t completed) {
     upload_frame_report();
     frame_upload_ns.store(0, std::memory_order_relaxed);
@@ -4200,9 +4206,28 @@ void texture_frame(uint64_t completed) {
     // may have (other programs use the GPU too). The least recently used go first, down to 7/8 of it; nothing the
     // last 8 presents used, nothing recorded work may still read.
     static uint64_t own = 0;
-    if (frame_no % 10) return;
+    static bool last_known;   // (the driver's numbers of the last full look, for the passes between)
+    static uint64_t last_used, last_allowed;
+    {   // (and a present in which a target's image was made new, not taken from the pool, asks for a pass three presents on,
+        // when what it replaced can first be found dead (RX_VK_DEAD_MIN_UNUSED): by the passes' own findings alone the first
+        // one of a run of new targets came at the next look, and in those ten presents the targets' blocks went 11 -> 22)
+        static uint64_t made_seen;
+        static const bool dead_quick = !(getenv("RX_VK_DEAD_QUICK") && !atoi(getenv("RX_VK_DEAD_QUICK")));
+        if (st_pool_made != made_seen) {
+            made_seen = st_pool_made;
+            if (dead_quick && (!dead_sweep_next || dead_sweep_next > frame_no + 3)) dead_sweep_next = frame_no + 3;
+        }
+    }
+    if (frame_no % 10) {
+        // (Triforce, 11-11) between the looks, a pass for the dead transient targets alone while the game makes them fast
+        // (dead_sweep_next, set by texture_sweep): see there
+        if (dead_sweep_next && frame_no >= dead_sweep_next)
+            texture_sweep(completed, true, ~0ull, 0, last_known, last_used, last_allowed, true);
+        return;
+    }
     uint64_t used = 0, allowed = 0, block_free = 0;
     const bool known = vram_usage(&used, &allowed, &block_free);
+    last_known = known, last_used = used, last_allowed = allowed;
     if (!own)   // (RX_VK_VRAM_MB, else 70% of what the driver allows the process at the first look)
         own = getenv("RX_VK_VRAM_MB") ? (uint64_t)atoi(getenv("RX_VK_VRAM_MB")) << 20
               : known                ? std::min<uint64_t>(allowed / 100 * (allowed <= (8704ull << 20) ? 45 : 70), 6144ull << 20)
@@ -4362,9 +4387,22 @@ void texture_frame(uint64_t completed) {
         logf("vk: verify %ux%u: %d textures, %d changed since uploaded, %d of them unnoticed", verify_dim().first,
              verify_dim().second, checked, changed, missed);
     }
+    texture_sweep(completed, total_bytes <= budget, budget, evict_to, known, used, allowed, false);
+}
+
+/// (texture_frame) What goes: over the budget the least recently used, and the render targets drawn over since.
+/// (Triforce, 11-11) dead_only: a pass between texture_frame's looks (every 10 presents) for the dead transient targets alone.
+/// While the camera moves the game makes them at new sizes all the time: 1.2-3 new images a present running across Hyrule
+/// Field in the lab, up to 11 a present between areas in a player's session (6733 in 600 presents). A dead one waited for the
+/// next look, 10 presents plus the 3 it must go unused: at ~20 MB each that is ~650 MB of dead images in the lab's run and
+/// 2.6 GB in that session, on top of what is drawn, their pool's blocks 18 -> 31, and at the driver's limit each new block
+/// took 110-170 ms (ten frames of 115-180 ms in a row). So when a pass finds them coming at one a present and more, the next
+/// pass is the next present, at one in three presents three presents on, else the next look as before: the dead wait 4-6
+/// presents, not 13. RX_VK_DEAD_QUICK=0: only at the looks, as before
+void texture_sweep(uint64_t completed, bool sweep, uint64_t budget, uint64_t evict_to, bool known, uint64_t used, uint64_t allowed,
+                   bool dead_only) {
     static const bool no_evict = getenv("RX_VK_NO_EVICT") != nullptr;   // (an experiment: nothing evicted)
     // (hookshot) under the budget, every 600 presents: the render targets drawn over since (below), unused for 120
-    const bool sweep = total_bytes <= budget;
     // (hookshot-amd) and every 60 presents for the render targets drawn over by one at another start (below): OoT makes a frame's
     // transient targets (768 x 432 RGBA16F, 1536 x 864) in a scratch heap whose offsets shift with what came before them in the
     // frame, so turning the camera made new ones each frame ~1.2 MB from the last, each a new image. Left for the 600-present
@@ -4376,7 +4414,14 @@ void texture_frame(uint64_t completed) {
     // ordered in 0.3 ms, 251 chosen in 0.2 (RTX 5070, Ryzen 7 9800X3D)
     static const uint64_t dead_every =
         getenv("RX_VK_DEAD_EVERY") ? (uint64_t)std::max(1, atoi(getenv("RX_VK_DEAD_EVERY"))) : 10;
-    if (no_evict || (sweep && frame_no % (dead_targets ? dead_every : 600))) return;
+    if (no_evict || (sweep && !dead_only && frame_no % (dead_targets ? dead_every : 600))) return;
+    static const bool dead_quick = !(getenv("RX_VK_DEAD_QUICK") && !atoi(getenv("RX_VK_DEAD_QUICK")));
+    static uint64_t dead_pass_last, quick_passes, quick_ns, quick_logged_at;
+    const auto pass_t0 = std::chrono::steady_clock::now();
+    const uint64_t pass_presents = std::max<uint64_t>(1, frame_no - dead_pass_last);
+    dead_pass_last = frame_no;
+    dead_sweep_next = 0;   // (this pass is the one asked for; the next: below, or a new image's, texture_frame)
+    size_t shifted_now = 0;
     std::vector<std::pair<uint64_t, Texture*>> order;
     order.reserve(textures.size());
     for (auto& kv : textures) order.push_back({kv.second->last_frame, kv.second.get()});
@@ -4569,7 +4614,7 @@ void texture_frame(uint64_t completed) {
     }
     for (const Evict& e : evict) {   // (and each one's bookkeeping and its end, as before)
         Texture* tex = e.tex;
-        if (e.shifted) n_dead++, b_dead += tex->bytes;
+        if (e.shifted) n_dead++, b_dead += tex->bytes, shifted_now++;
         watch_tex(tex, "evicted");
         if (!tex->gpu_written && tex->uploaded && !remade_skip_old()) {   // (above: made again, it is uploaded from memory)
             std::lock_guard lk(from_memory_mu);
@@ -4601,7 +4646,21 @@ void texture_frame(uint64_t completed) {
              (unsigned long long)(b_dead >> 20));
     }
     const size_t n = order.size() - textures.size();
-    if (n) logf("vk: %zu textures retired (%zu left, %llu MB)", n, textures.size(), (unsigned long long)(total_bytes >> 20));
+    if (n && !dead_only) logf("vk: %zu textures retired (%zu left, %llu MB)", n, textures.size(), (unsigned long long)(total_bytes >> 20));
+    // (the next pass for the dead targets: by how fast this one found them coming)
+    if (dead_quick && dead_targets) {
+        if (shifted_now >= pass_presents) dead_sweep_next = frame_no + 1;
+        else if (shifted_now * 3 >= pass_presents) dead_sweep_next = frame_no + 3;
+    }
+    if (dead_only) {
+        quick_passes++;
+        quick_ns += (uint64_t)std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - pass_t0).count();
+    }
+    if (quick_passes && frame_no >= quick_logged_at + 600) {
+        quick_logged_at = frame_no;
+        logf("vk: passes for the dead render targets between the looks: %llu so far, %.2f ms each", (unsigned long long)quick_passes,
+             quick_ns / 1e6 / (double)quick_passes);
+    }
 }
 
 void texture_log_guest(const Texture* t) {

@@ -254,6 +254,7 @@ struct ImageMove {
 };
 /// The free space inside the textures' pool's blocks, and what the blocks hold in all; false without the pool
 bool textures_pool_usage(uint64_t* block_bytes, uint64_t* free_bytes);
+bool target_floor_kept();   // (the render targets' pool keeps a floor of blocks for the session: RX_VK_TARGET_FLOOR_MB)
 bool image_compact_begin(uint64_t max_bytes_a_pass, uint32_t max_moves_a_pass);
 bool image_compact_active();
 /// A pass begun: the moves VMA asks for. False: nothing left to move, the compaction is over (then *freed_bytes and

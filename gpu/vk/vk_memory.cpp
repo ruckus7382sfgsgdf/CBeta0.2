@@ -4259,7 +4259,7 @@ void imports_give_back() {   // (pools_mu held)
     // two players' logs there show a working set of 8-10 GB against peaks of 11.2-11.4, the system taking pages back all the
     // time, and on one the staging arenas refused ("no 64 MB arena could be made; the upload waits", 8,586 textures left for a
     // later frame: the flat white and blue ones).
-    // And a second trigger beside the heap's budget: the PC's RAM itself running short (under 8% of it or 1.5 GB available,
+    // And a second trigger beside the heap's budget: the PC's RAM itself running short (under 1.5 GB available,
     // GlobalMemoryStatusEx; RX_VK_IMPORT_RAM=0: not), which then gives back every import unbound for kImportIdleRam submissions
     // (~10 s of play), up to 1 GB a pass. With RAM to spare nothing changes: an import given back costs 5-45 ms when its pool is
     // bound again. RX_VK_IMPORT_HIGH=0: off altogether. (lab: RX_VK_TEST_AVAIL_MB=<n> plays that much RAM available)
@@ -4290,7 +4290,10 @@ void imports_give_back() {   // (pools_mu held)
         ms.dwLength = sizeof ms;
         if (GlobalMemoryStatusEx(&ms)) {
             ram_total = ms.ullTotalPhys, ram_avail = test_avail >= 0 ? (uint64_t)test_avail << 20 : ms.ullAvailPhys;
-            ram_short = ram_avail < std::max<uint64_t>(ram_total / 100 * 8, 1536ull << 20);
+            // (Triforce, later on 11-11: 1.5 GB whatever the PC has, not 8% of it as well. On a 32 GB PC 8% is 2.6 GB, and a
+            // player's session there sat at 2.2-2.6 GB available with nothing wrong: the rule fired 15 times in 3.5 minutes,
+            // and 9 of the session's imports were of chunks it had given back, ~30 ms each on the replay thread)
+            ram_short = ram_avail < (1536ull << 20);
         }
     }
     const bool by_heap = small && used > budget / 100 * (uint64_t)high;
