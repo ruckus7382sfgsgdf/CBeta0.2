@@ -7394,13 +7394,16 @@ void prepare_background() {
 // draw, and neither it nor its program is in RAM until then.
 // The price, same tour: of ~4050 pipelines then built in play, ten or twelve submissions spend 10-65 ms on them (some in frames
 // that were slow anyway, an area's arrival; three or four make a 40 ms frame of their own), and one in two tours had a
-// pipeline the caches missed (508 ms). So it is not the default: RX_VK_PRECOMPILE_KEEP=auto: this rule where the PC has under
-// 20 GB of RAM; =0: on any PC; unset or 1: every start builds and keeps all, as before ----
+// pipeline the caches missed (508 ms). So it was not the default at first (RX_VK_PRECOMPILE_KEEP=auto asked for it).
+// (Triforce, 11-12) It is the default now where the PC has under 20 GB of RAM. A player's 16 GB PC (RTX 3060, v0.3.3): the
+// process at 10.2 GB in RAM and 19 to 22 GB reserved with 9946 pipelines kept, Windows down to 330 MB available, and a
+// warp froze the game for 39.6 s while Windows paged 7 GB of it out (working set 10.2 -> 3.3 GB). A few 10-65 ms frames
+// are the lesser evil there. RX_VK_PRECOMPILE_KEEP=1: every start builds and keeps all, as before; =0: this rule on any
+// PC; unset or auto: this rule under 20 GB of RAM ----
 constexpr uint64_t kBuiltComputes = 0xC04D50555445D001ull;   // (in the record: the compute programs' pipelines were built)
 bool precompile_keeps_all() {
     const char* e = getenv("RX_VK_PRECOMPILE_KEEP");
-    if (!e) return true;
-    if (strcmp(e, "auto")) return atoi(e) != 0;
+    if (e && strcmp(e, "auto")) return atoi(e) != 0;
 #ifdef _WIN32
     MEMORYSTATUSEX ms{};
     ms.dwLength = sizeof ms;
@@ -8199,6 +8202,26 @@ int64_t draw_slotgen_saves() {   // (RX_VK_DESC_SLOTGEN: of those, what the glob
 
 void pipeline_cache_save(bool force) {
     if (!pcache || (!force && pcache_built_since_save < 32)) return;
+    // (Triforce, 11-12) Intel: the cache is not fetched in play, only where a save is asked for outright (the prepare, the
+    // menu's restart, the exit). A player's Arc A750 (driver 0x1963be, v0.3.3) crashed in every session a short while into
+    // the Deku Tree: an access violation in igvk64.dll+0x79ddf3 (read 0x190), called from this function's thread, inside
+    // vkGetPipelineCacheData, while the workers went on building the area's new pipelines with the same cache. The same
+    // address is in upstream's Intel tracker for an A750 (NotRexed/Hookshot #17 in #999), not traced there. The Vulkan rule
+    // lets the two run together; that driver does not. What play builds is in the driver's own cache and in the
+    // pipeline list either way. RX_VK_PCACHE_PLAY_SAVE=1: fetched in play as on other cards; =0: not, on any card.
+    if (!force) {
+        static const char* e = getenv("RX_VK_PCACHE_PLAY_SAVE");
+        static const bool in_play = e ? atoi(e) != 0 : dev.props.vendorID != 0x8086;
+        if (!in_play) {
+            static bool told = false;
+            if (!told) {
+                told = true;
+                logf("vk: the pipeline cache is not saved while playing%s; it is saved when the game closes "
+                     "(RX_VK_PCACHE_PLAY_SAVE=1: in play too)", e ? "" : " on Intel (its driver crashed there)");
+            }
+            return;
+        }
+    }
     pcache_built_since_save = 0;
     // (on a thread of its own unless forced, at exit: ~100 MB fetched and written took the replay thread 100+ ms at
     // each scene change; the cache is internally synchronized, pipelines go on being built meanwhile)
