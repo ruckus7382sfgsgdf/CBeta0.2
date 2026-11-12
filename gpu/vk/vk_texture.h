@@ -64,6 +64,8 @@ struct Texture {
     bool only_cleared = false; // (hookshot) all the GPU did was clear it: what the CPU writes after still counts (a font cache's glyphs)
     uint32_t gpu_gen = 0;     // (the memory generation when the GPU last wrote it: CPU writes after it are taken)
     bool released = false;    // its texture was finalized after the GPU wrote it: CPU writes count again
+    uint64_t let_go = 0;      // (Triforce) the present at which the game finalized a texture over it, 0 once it is used again:
+                              // one uploaded from memory goes first while VRAM is short (texture_sweep)
     uint32_t release_gen = 0;
     uint64_t gpu_wrote_seen = 0;   // (the newest finished GPU write into its storage it was uploaded after)
     uint64_t last_written = 0;     // (the frame the GPU last wrote it: a render target, each frame it is used)

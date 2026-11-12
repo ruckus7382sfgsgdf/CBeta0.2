@@ -5832,15 +5832,13 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
             if (skip) return;
         }
     }
-    // Not ready (translating, or its pipeline building): left out of the frame when its targets hold an earlier
-    // frame's picture already, which shows for a frame without it; waited for otherwise (a pass drawn once, a target
-    // made this frame), as totk-pc-recomp's TOTK_PIPE_SKIP rule. RX_VK_PIPE_WAIT=1: always waited for.
-    // (waited for by default: a draw left out showed as missing geometry in races, where many programs are new;
-    // RX_VK_PIPE_SKIP=1: left out when its targets hold an earlier frame's picture, as before)
-    // (hookshot: left out by default. Waiting, Ocarina froze 0.2-3 s at each area's first new programs, the most reported stutter;
-    // RX_VK_PIPE_SKIP=0: waited for, as mkw-recomp needs)
+    // Wait for translation before reading its stages. A pending pipeline may be left out only when no stage writes
+    // global memory or storage buffers/images and its targets hold an earlier frame's picture. RX_VK_PIPE_SKIP=0:
+    // pipelines are always waited for too.
+    // Waiting on unknown translations preserves writes but can restore first-visit pauses (previously 0.2-3 s).
+    // RX_VK_PIPE_SKIP=2 restores the old translation skip for persistent targets; after translation, memory-writing pipelines wait.
     static const bool always_wait = getenv("RX_VK_PIPE_SKIP") && atoi(getenv("RX_VK_PIPE_SKIP")) == 0;
-    const bool may_skip = !always_wait && targets_persistent(at);
+    static const bool legacy_translation_skip = getenv("RX_VK_PIPE_SKIP") && atoi(getenv("RX_VK_PIPE_SKIP")) == 2;
     auto wait_for = [&](const std::atomic<bool>& ready) {
         PROF_EXACT();
         const auto t0 = std::chrono::steady_clock::now();
@@ -5849,7 +5847,7 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
         st_wait_ms += std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     };
     if (!cp->ready.load(std::memory_order_acquire)) {
-        if (may_skip) return void(st_pending_skips++);
+        if (legacy_translation_skip && targets_persistent(at)) return void(st_pending_skips++);
         wait_for(cp->ready);
     }
     if (exposure_log_on() && cp) exposure_note(s, *cp);
@@ -5880,6 +5878,19 @@ void draw(VkCommandBuffer cmd, NvnState& s, const DrawArgs& d) {
         pe = graphics_pipeline(p, s, at, topo, types);
     }
     if (!pe->ready.load(std::memory_order_acquire)) {
+        bool may_skip = !always_wait && targets_persistent(at);
+        if (may_skip)
+            for (const Stage& st : p.stages) {
+                const auto& info = st.info;
+                const auto written = [](const auto& ds) {
+                    return std::any_of(ds.begin(), ds.end(), [](const auto& d) { return d.is_written; });
+                };
+                if (info.stores_global_memory || written(info.storage_buffers_descriptors) ||
+                    written(info.image_buffer_descriptors) || written(info.image_descriptors)) {
+                    may_skip = false;
+                    break;
+                }
+            }
         if (may_skip) return void(st_pending_skips++);
         wait_for(pe->ready);
     }
