@@ -137,7 +137,7 @@ def add_to_menu(folder):
     if any(ch in folder for ch in "\r\n\0"):   # (a line break would start another key of the entry)
         raise ValueError("the game folder's name has a line break")
     icon = os.path.join(folder, "hookshot.png")
-    src = os.path.join(ROOT, "assets", "hookshot.png")
+    src = os.path.join(ROOT, "assets", "triforce.png")
     if os.path.exists(src):
         shutil.copyfile(src, icon)
     apps = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "applications")
@@ -531,7 +531,7 @@ class Builder(tk.Tk):
         """assets/hookshot.png (the Windows head's and the game's icon), size pixels wide over the page: averaged down with its
         alpha on Tk 9, every nth pixel on an older Tk"""
         self.images["logo"] = None
-        path = os.path.join(ROOT, "assets", "hookshot.png")
+        path = os.path.join(ROOT, "assets", "triforce.png")
         try:
             full = tk.PhotoImage(master=self, file=path)
         except (tk.TclError, OSError):

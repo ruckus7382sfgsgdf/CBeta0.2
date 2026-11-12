@@ -476,7 +476,7 @@ def _finish_tree(dest):
     apprun = os.path.join(dest, "AppRun")
     shutil.copyfile(os.path.join(tools, "builder", "linux", "AppRun"), apprun)
     os.chmod(apprun, 0o755)   # (rwxr-xr-x: the launcher must run; only its owner may change it)
-    icon = os.path.join(tools, "assets", "hookshot.png")
+    icon = os.path.join(tools, "assets", "triforce.png")
     if os.path.isfile(icon):
         shutil.copyfile(icon, os.path.join(dest, "hookshot.png"))
     desktop = os.path.join(tools, "builder", "linux", "hookshot-builder.desktop")

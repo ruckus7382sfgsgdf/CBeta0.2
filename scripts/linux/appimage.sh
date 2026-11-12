@@ -138,9 +138,9 @@ cp builder/linux/AppRun "$APPDIR/AppRun"
 cp builder/linux/hookshot-builder.desktop "$APPDIR/"
 # (RecompLauncher reads this from inside the AppImage, at /recomplauncher.json)
 cp recomplauncher.json "$APPDIR/recomplauncher.json"
-cp assets/hookshot.png "$APPDIR/hookshot.png"
+cp assets/triforce.png "$APPDIR/hookshot.png"   # (Triforce's crest; the name in the image is the one the menu entry and the update list have)
 mkdir -p "$APPDIR/usr/share/icons/hicolor/256x256/apps"
-cp assets/hookshot.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/hookshot.png"
+cp assets/triforce.png "$APPDIR/usr/share/icons/hicolor/256x256/apps/hookshot.png"
 
 # (the update list, beside AppRun and not inside a hashed part: triforce-linux.txt names each part's checksum)
 # (the parts are served from the linux-parts release of the repository this is built in, where
