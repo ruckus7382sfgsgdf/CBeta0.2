@@ -185,18 +185,18 @@ jobs:
       - name: llvm-mingw
         run: echo "HOOKSHOT_MINGW=$(python -I scripts/release_parts.py llvm-mingw "$RUNNER_TEMP/llvm")" >> "$GITHUB_ENV"
       # (as scripts/linux/appimage.sh builds Linux's: the back end alone, no lift, no game)
-      - name: hookshot_vk.dll
+      - name: triforce_vk.dll
         env:
           RX_VK_ONLY: '1'
           RX_RELEASE: '1'
         run: |
           OOT_WORK="$RUNNER_TEMP/vk-work" RX_CPM="$GITHUB_WORKSPACE/_deps/cpm" \
             python -I nx2/build.py --standalone --jobs "$NUMBER_OF_PROCESSORS"
-          ls -l "$RUNNER_TEMP/vk-work/sa/build/hookshot_vk.dll"
+          ls -l "$RUNNER_TEMP/vk-work/sa/build/triforce_vk.dll"
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: hookshot_vk-windows
-          path: ${{ runner.temp }}/vk-work/sa/build/hookshot_vk.dll
+          name: triforce_vk-windows
+          path: ${{ runner.temp }}/vk-work/sa/build/triforce_vk.dll
           if-no-files-found: error
 
   release:

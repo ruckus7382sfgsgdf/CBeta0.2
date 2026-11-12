@@ -190,7 +190,7 @@ class LinuxBuilderDlssTests(unittest.TestCase):
         self.assertIn("https://github.com/NVIDIA/DLSS/blob/", self.builder.DLSS_LICENSE)
         self.assertIn("never share a game folder built with them", self.builder.DLSS_LICENSE)
         with mock.patch.dict(os.environ, {"HOOKSHOT_BUILDER_HOME": str(self.root)}):
-            sdk = str(self.root / "hookshot" / "builder" / "ngx-sdk")
+            sdk = str(self.root / "triforce" / "builder" / "ngx-sdk")
             self.assertEqual(self.builder.ngx_sdk_dir(), sdk)
             env_off = self.builder.make_game_env(False, {"HOOKSHOT_NGX_SDK": "/stale", "HOOKSHOT_VK_PREBUILT": "/app/hookshot_vk.so"})
             self.assertNotIn("HOOKSHOT_NGX_SDK", env_off)

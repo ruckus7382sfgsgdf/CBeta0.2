@@ -85,6 +85,17 @@ static int32_t stick_value(int16_t v, int flip, int zone) {
 static int pads_start(void) {
     /* poll in the background, whatever window is in front (nn_hid.c decides when input counts) */
     hos_sdl_hint("SDL_JOYSTICK_ALLOW_BACKGROUND_EVENTS", "1");
+#ifdef _WIN32
+    /* (Triforce, 11-12) SDL's own thread for its controller window's messages. On Windows SDL reads an Xbox pad through
+       raw input: the buttons and sticks arrive as WM_INPUT messages to a window SDL makes on the thread that starts its
+       controllers, and only the triggers and Guide come from XInput. SDL handles those messages in its video event loop,
+       or on a thread of its own with this hint; this thread has neither a window loop nor SDL's video, so the messages
+       were never handled: once SDL had opened the pad only the triggers worked, until the game was started again with
+       the pad turned on later (SDL never saw that pad, its arrival being such a message too, and XInput read it). A
+       player's Xbox Series X pad on the Xbox Wireless Adapter, SDL 2.32.10, the same calls in a probe: XInput 694 state
+       changes in 8 s of pressing, SDL 0 button or stick changes with the triggers moving; with the hint 579 for 700. */
+    hos_sdl_hint("SDL_JOYSTICK_THREAD", "1");
+#endif
     /* (SDL2: PlayStation pads' rumble asked for; SDL3 turns it on when a rumble is first sent) */
     hos_sdl_hint("SDL_JOYSTICK_HIDAPI_PS5_RUMBLE", "1");
     hos_sdl_hint("SDL_JOYSTICK_HIDAPI_PS4_RUMBLE", "1");

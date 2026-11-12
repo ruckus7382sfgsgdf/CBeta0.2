@@ -5,7 +5,7 @@
 Each directory that changes on its own is one zip: the tools (every release), Python, clang, FFmpeg, the sysroot, and
 the two libraries beside them. A zip is deterministic, so a directory whose files did not change has the same SHA-256
 next time and the builder copies the one it already has. The zips are uploaded to the linux-parts release; the version's
-own release carries hookshot-linux.txt, which names them.
+own release carries triforce-linux.txt, which names them.
 
 The list is not inside a zip (it names the zips' checksums).
 """
@@ -106,10 +106,10 @@ def main():
         lines.append("tree" if files is None else "\n".join("file %s" % name for name in files))
         print("%-32s %5d MB  %s" % (dest, size >> 20, digest[:16]), flush=True)
     text = "\n".join(lines) + "\n"
-    with open(os.path.join(args.out, "hookshot-linux.txt"), "w", encoding="utf-8", newline="\n") as handle:
+    with open(os.path.join(args.out, "triforce-linux.txt"), "w", encoding="utf-8", newline="\n") as handle:
         handle.write(text)
     # (beside AppRun, not inside a hashed part: the list names those checksums)
-    with open(os.path.join(root, "hookshot-linux.txt"), "w", encoding="utf-8", newline="\n") as handle:
+    with open(os.path.join(root, "triforce-linux.txt"), "w", encoding="utf-8", newline="\n") as handle:
         handle.write(text)
 
 

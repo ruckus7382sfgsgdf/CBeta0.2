@@ -236,14 +236,14 @@ static int latest_tag(char *tag, size_t cap) {
                     "https://github.com/ruckus7382sfgsgdf/CBeta0.2/releases/latest/download/triforce-linux.txt 2>/dev/null", tag, cap);
 }
 
-/* the builder an update installed (builder/linux/linux_update.py): <data>/hookshot/builder/versions/<current>/AppRun. The
+/* the builder an update installed (builder/linux/linux_update.py): <data>/triforce/builder/versions/<current>/AppRun. The
    builder= line names the AppImage that built the folder, which the player may have deleted since */
 static int installed_builder(char *out, size_t cap) {
     const char *home = getenv("HOOKSHOT_BUILDER_HOME"), *data = getenv("XDG_DATA_HOME"), *user = getenv("HOME");
     char root[MAX_PATH * 2], path[MAX_PATH * 2 + 64], tag[128];
-    if (home && *home) snprintf(root, sizeof root, "%s/hookshot/builder", home);
-    else if (data && *data) snprintf(root, sizeof root, "%s/hookshot/builder", data);
-    else if (user && *user) snprintf(root, sizeof root, "%s/.local/share/hookshot/builder", user);
+    if (home && *home) snprintf(root, sizeof root, "%s/triforce/builder", home);
+    else if (data && *data) snprintf(root, sizeof root, "%s/triforce/builder", data);
+    else if (user && *user) snprintf(root, sizeof root, "%s/.local/share/triforce/builder", user);
     else return 0;
     snprintf(path, sizeof path, "%s/current", root);
     FILE *f = fopen(path, "rb");

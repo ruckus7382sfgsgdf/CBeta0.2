@@ -1,4 +1,4 @@
-"""Hookshot Builder for Linux: what builder/HookshotBuilder (WPF) is on Windows, in Tk. It runs nx2/make_game.py and
+"""Triforce Builder for Linux: what builder/HookshotBuilder (WPF) is on Windows, in Tk. It runs nx2/make_game.py and
 follows its @@ lines (make_game.py's docstring), then offers to start the game. The AppImage starts it (builder/linux/AppRun),
 with the compiler, sysroot and libraries it brings in the environment.
 
@@ -29,15 +29,15 @@ import linux_update  # noqa: E402  (the release check and the part download)
 import make_game  # noqa: E402  (LANGUAGES, BUILD_ID)
 import toolchain  # noqa: E402  (default_jobs: RX_JOBS)
 
-CONFIG = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "hookshot", "builder.ini")
+CONFIG = os.path.join(os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"), "triforce", "builder.ini")
 STAGES = {"read": "Reading your game files", "lift": "Translating the game to PC code", "compile": "Compiling",
           "finish": "Putting the game folder together", "shaders": "Preparing shaders"}
 DLSS_LICENSE = (
-    "NVIDIA DLSS is NVIDIA's, not Hookshot's. With it ticked, the build downloads NVIDIA's DLSS SDK (release v310.9.16) from "
+    "NVIDIA DLSS is NVIDIA's, not Triforce's. With it ticked, the build downloads NVIDIA's DLSS SDK (release v310.9.16) from "
     "github.com/NVIDIA/DLSS, under NVIDIA's own license, the NVIDIA RTX SDKs license:\n\n"
     "https://github.com/NVIDIA/DLSS/blob/9981c6350dc58c0ce21f024fd65e31e851c31689/LICENSE.txt\n\n"
     "Its files stay on this PC (in the builder's ngx-sdk folder, and libnvidia-ngx-dlss.so in the game folder's ngx folder). "
-    "Hookshot never includes or shares them: never share a game folder built with them.\n\n"
+    "Triforce never includes or shares them: never share a game folder built with them.\n\n"
     "Do you accept NVIDIA's license?"
 )
 
@@ -142,14 +142,14 @@ def add_to_menu(folder):
         shutil.copyfile(src, icon)
     apps = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"), "applications")
     os.makedirs(apps, exist_ok=True)
-    with open(os.path.join(apps, "hookshot.desktop"), "w", encoding="utf-8") as f:
-        f.write("[Desktop Entry]\nType=Application\nName=Hookshot\nComment=The Legend of Zelda: Ocarina of Time, built from your copy\n"
+    with open(os.path.join(apps, "triforce.desktop"), "w", encoding="utf-8") as f:
+        f.write("[Desktop Entry]\nType=Application\nName=Triforce\nComment=The Legend of Zelda: Ocarina of Time, built from your copy\n"
                 "Exec=%s\nPath=%s\nIcon=%s\nCategories=Game;\nTerminal=false\nStartupWMClass=%s\n"
-                % (desktop_exec(os.path.join(folder, "hookshot")), folder, icon, APP_ID))
+                % (desktop_exec(os.path.join(folder, "triforce")), folder, icon, APP_ID))
 
 
 def free_gb(path):
-    path = os.path.expanduser(path or "")   # (the field takes ~/Games/Hookshot, as build() and apply_mode() read it)
+    path = os.path.expanduser(path or "")   # (the field takes ~/Games/Triforce, as build() and apply_mode() read it)
     while path and not os.path.exists(path):
         path = os.path.dirname(path)
     try:
@@ -308,7 +308,7 @@ def _arg(name):
 class Builder(tk.Tk):
     def __init__(self, launch=None, update=None, fetched=False, tag=None):
         super().__init__()
-        self.title("Hookshot Builder")
+        self.title("Triforce Builder")
         self.apply_scale()
         self.apply_theme()
         self.minsize(self.px(760), self.px(520))
@@ -330,7 +330,7 @@ class Builder(tk.Tk):
         self.nup = tk.StringVar(value=self.cfg.get("nup", ""))
         self.romfs = tk.StringVar(value=self.cfg.get("romfs", ""))
         self.exefs = tk.StringVar(value=self.cfg.get("exefs", ""))
-        self.out = tk.StringVar(value=self.cfg.get("out", os.path.expanduser("~/Games/Hookshot")))
+        self.out = tk.StringVar(value=self.cfg.get("out", os.path.expanduser("~/Games/Triforce")))
         names = [n for _, n in make_game.LANGUAGES]
         code = self.cfg.get("language", "en-US")
         self.language = tk.StringVar(value=dict(make_game.LANGUAGES).get(code, names[0]))
@@ -578,8 +578,8 @@ class Builder(tk.Tk):
         if self.images.get("logo") is not None:
             canvas.create_image(x, px(32), image=self.images["logo"], anchor="w")
             x += self.images["logo"].width() + px(10)
-        canvas.create_text(x, px(32), text="Hookshot", font="HsBrand", fill=INK, anchor="w")
-        x += int(self.tk.call("font", "measure", "HsBrand", "Hookshot"))
+        canvas.create_text(x, px(32), text="Triforce", font="HsBrand", fill=INK, anchor="w")
+        x += int(self.tk.call("font", "measure", "HsBrand", "Triforce"))
         if chip:
             canvas.create_text(x + px(12), px(32), text=chip, font="HsSmall", fill=INK_SOFT, anchor="w")
         self.header_canvas = canvas
@@ -644,7 +644,7 @@ class Builder(tk.Tk):
 
     # ---- the form ----
     def show_form(self):
-        self.title("Hookshot Builder")
+        self.title("Triforce Builder")
         if self.page:
             self.page.destroy()
         px = self.px
@@ -657,7 +657,7 @@ class Builder(tk.Tk):
         f.columnconfigure(1, minsize=px(20))
         f.columnconfigure(2, minsize=px(200))
         ttk.Label(f, text="Build your game", style="Title.TLabel").grid(row=0, column=0, columnspan=3, sticky="w")
-        ttk.Label(f, text="Pick your game files and where the game goes. Hookshot does the rest, once.", style="Sub.TLabel",
+        ttk.Label(f, text="Pick your game files and where the game goes. Triforce does the rest, once.", style="Sub.TLabel",
                   wraplength=px(800)).grid(row=1, column=0, columnspan=3, sticky="w", pady=(px(6), 0))
         if game_ready(self.cfg.get("out")):
             ttk.Button(f, text="Play the game built in %s" % self.cfg["out"], command=lambda: self.play_and_close(self.cfg["out"])).grid(
@@ -819,14 +819,14 @@ class Builder(tk.Tk):
             self.status.set("Update builds your game again %s NVIDIA DLSS."
                             % ("with" if self.dlss.get() else "without"))
         elif self.mode == "update-game":
-            self.status.set("Hookshot %s is available. Your game is %s. Update downloads only what changed, then compiles what changed."
+            self.status.set("Triforce %s is available. Your game is %s. Update downloads only what changed, then compiles what changed."
                             % (target, game))
         elif self.mode == "up-to-date" and self.latest is None:
             self.status.set("Your game is %s, as this builder. GitHub did not answer, so newer versions could not be checked." % game)
         elif self.mode == "up-to-date":
             self.status.set("%s is the latest version." % game)
         elif self.mode == "update-builder":
-            self.status.set("Hookshot Builder %s is available (this one is %s). Update it first, then build." % (self.latest, self.tools or "this one"))
+            self.status.set("Triforce Builder %s is available (this one is %s). Update it first, then build." % (self.latest, self.tools or "this one"))
         else:
             self.status.set("")
 
@@ -840,20 +840,20 @@ class Builder(tk.Tk):
             self.launch_status.set("Update available: %s" % target)
             show = True
         elif target and game and game != target:
-            self.launch_status.set("%s is out. Build this folder again with Hookshot Builder to get it." % target)
+            self.launch_status.set("%s is out. Build this folder again with Triforce Builder to get it." % target)
         elif game and self.latest is None:
             self.launch_status.set("Up to date with this builder (GitHub did not answer)")
         elif game:
             self.launch_status.set("Up to date")
         else:
-            self.launch_status.set("Could not check for updates (GitHub did not answer)" if self.latest is None else "Hookshot")
+            self.launch_status.set("Could not check for updates (GitHub did not answer)" if self.latest is None else "Triforce")
         if hasattr(self, "launch_update"):
             self.launch_update.pack(side="right", padx=self.px(4)) if show else self.launch_update.pack_forget()
 
     def show_launch(self, folder):
         if self.page:
             self.page.destroy()
-        self.title("Hookshot")
+        self.title("Triforce")
         px = self.px
         page = self.page = ttk.Frame(self)
         page.pack(fill="both", expand=True)
@@ -881,7 +881,7 @@ class Builder(tk.Tk):
     def begin_update(self, folder=None):
         if folder is not None:
             self.update_folder = folder
-        self.show_progress("Updating your game" if self.update_folder else "Updating Hookshot Builder")
+        self.show_progress("Updating your game" if self.update_folder else "Updating Triforce Builder")
         folder = self.update_folder
         # (a game older than this builder is built again with it: nothing to download, and GitHub need not answer. So is one
         # from a builder that is not an older release, e.g. from the Actions tab: issue 902)
@@ -952,20 +952,20 @@ class Builder(tk.Tk):
         out = os.path.expanduser(self.out.get().strip())
         if self.kind.get() == "nup":
             if not os.path.isfile(self.nup.get()):
-                return messagebox.showerror("Hookshot", "Choose your game's .nup file.")
+                return messagebox.showerror("Triforce", "Choose your game's .nup file.")
             src = ["--nup", self.nup.get()]
         else:
             if not (os.path.isdir(self.romfs.get()) and os.path.isdir(self.exefs.get())):
-                return messagebox.showerror("Hookshot", "Choose your game's romfs and exefs folders.")
+                return messagebox.showerror("Triforce", "Choose your game's romfs and exefs folders.")
             src = ["--romfs", self.romfs.get(), "--exefs", self.exefs.get()]
         if not out:
-            return messagebox.showerror("Hookshot", "Choose where to save the game.")
+            return messagebox.showerror("Triforce", "Choose where to save the game.")
         try:
             jobs = make_game.requested_jobs(os.environ.get("HOOKSHOT_JOBS"))
             if jobs is None and os.environ.get("RX_JOBS"):   # (the older setting, still honoured)
                 jobs = toolchain.default_jobs()
         except ValueError as error:
-            return messagebox.showerror("Hookshot", str(error))
+            return messagebox.showerror("Triforce", str(error))
         code = next((c for c, n in make_game.LANGUAGES if n == self.language.get()), "en-US")
         dlss = bool(self.dlss.get()) if hasattr(self, "dlss") else False
         self.cfg.update(kind=self.kind.get(), nup=self.nup.get(), romfs=self.romfs.get(), exefs=self.exefs.get(), out=out, language=code,
@@ -977,7 +977,7 @@ class Builder(tk.Tk):
             ([] if jobs is None else ["--jobs", str(jobs)]) + ([] if self.prepare.get() else ["--no-prepare-shaders"]) + \
             (dlss_args(True) if dlss else [])
         slow = slow_disk_warning(out)   # (a warning, not a stop: a hard drive still builds, only much slower)
-        if slow is not None and not messagebox.askokcancel("Hookshot", slow):
+        if slow is not None and not messagebox.askokcancel("Triforce", slow):
             return
         self.show_progress()
         self.started = time.time()
@@ -1182,7 +1182,7 @@ class Builder(tk.Tk):
 
     def close(self):
         if self.proc and self.proc.poll() is None:
-            if not messagebox.askyesno("Hookshot", "Stop the build and close?"):
+            if not messagebox.askyesno("Triforce", "Stop the build and close?"):
                 return
             os.killpg(self.proc.pid, signal.SIGTERM)
         self.destroy()

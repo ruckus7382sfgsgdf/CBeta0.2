@@ -692,6 +692,37 @@ static void pads_read(uint64_t *buttons, int32_t stick[4]) {
             if (rx_option(17, 0)) v[3] = -v[3];
             stick_max(s, v);
         }
+    } else if (xinput_get) {
+        /* (Triforce, 11-12) SDL has the pads: XInput is only looked at, ten times a second, for the pads it had before
+           SDL opened its own. A pad whose buttons XInput shows down while SDL shows none, 20 looks with no look between
+           where SDL showed one: SDL's button input is not arriving (pad_sdl.c's SDL_JOYSTICK_THREAD), said once */
+        static int64_t next_look;
+        static int silent, said;
+        if (!said && now >= next_look) {
+            next_look = now + 100000000LL;
+            const uint64_t triggers = 1ULL << HOS_PAD_LTRIGGER | 1ULL << HOS_PAD_RTRIGGER;
+            for (int p = 0; p < XUSER_MAX_COUNT; p++) {
+                if (!was_connected[p]) continue;
+                XINPUT_STATE xs;
+                if (xinput_get((DWORD)p, &xs) != ERROR_SUCCESS) {
+                    hos_log("hid: controller %d disconnected", p);
+                    was_connected[p] = 0;
+                    continue;
+                }
+                if (!xs.Gamepad.wButtons) continue;
+                if (raw & ~triggers) {
+                    silent = 0;
+                    continue;
+                }
+                if (++silent >= 20) {
+                    said = 1;
+                    hos_log("hid: XInput shows controller %d's buttons down and SDL shows none, 20 times running: SDL's "
+                            "button and stick input is not arriving (HOS_NO_SDL=1 in triforce_env.txt reads the "
+                            "controllers through XInput alone)", p);
+                    break;
+                }
+            }
+        }
     }
     InterlockedExchange(&pad_raw_now, (LONG)raw);
     /* Back and Start together open the Insert menu (gpu/vk/vk_menu.cpp, for pads whose Home button the system

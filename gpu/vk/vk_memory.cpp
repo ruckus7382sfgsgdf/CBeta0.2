@@ -3567,7 +3567,12 @@ void mirror_sync(Pool& p) {
             logf("vk: pool %#llx (%llu MB): CPU over GPU pages in %u syncs, %.1f bindings a sync", (unsigned long long)p.lo,
                  (unsigned long long)((p.hi - p.lo) >> 20), p.conflict_syncs, p.bind_rate);
         // (Triforce: RX_VK_DEMOTE_PIECES=1: a mirror in pieces of any size: only the pieces with such pages leave it)
-        if (p.conflict_syncs >= 8 && !p.demote_queued && !off && ((p.mpieces && demote_pieces_mode() == 1) || p.hi - p.lo <= (cap_mb << 20)) &&
+        // (Triforce, 11-12: the size cap holds for a mirror in pieces again. Only the piece leaves, but every binding that
+        // reaches it is bound whole in guest memory: the 224 MB pool's one 256 KB piece put 17 to 46 GB of bindings over PCIe
+        // per 600 submits in a player's fights (18 to 45 fps), and the trials alone, lost or won, made a lab tour's frames over
+        // 40 ms 409 against ~75. RX_VK_DEMOTE_ANY_SIZE=1: as before)
+        static const bool any_size = getenv("RX_VK_DEMOTE_ANY_SIZE") != nullptr;
+        if (p.conflict_syncs >= 8 && !p.demote_queued && !off && ((p.mpieces && demote_pieces_mode() == 1 && any_size) || p.hi - p.lo <= (cap_mb << 20)) &&
             !p.demote_blocked && p.compute_writes) {
             p.demote_queued = true;
             demote_wanted.push_back(p.lo);
@@ -4389,7 +4394,8 @@ void demote_trials() {
             {   // (Triforce) the size cap once more, on the pool as it is now: the list holds starts, and a 48 MB pool queued
                 // before it was remade as a 224 MB one took that one out of the mirrors whole (see below)
                 static const uint64_t cap_mb = getenv("RX_VK_DEMOTE_MB") ? strtoull(getenv("RX_VK_DEMOTE_MB"), nullptr, 10) : 64;
-                if (!(p->mpieces && demote_pieces_mode() == 1) && p->hi - p->lo > (cap_mb << 20)) {
+                static const bool any_size = getenv("RX_VK_DEMOTE_ANY_SIZE") != nullptr;   // (11-12: the cap holds in pieces too, above)
+                if (!(p->mpieces && demote_pieces_mode() == 1 && any_size) && p->hi - p->lo > (cap_mb << 20)) {
                     p->demote_queued = false, p->conflict_syncs = 0;
                     std::fill(p->conf_bits.begin(), p->conf_bits.end(), 0ull);
                     continue;
@@ -4583,10 +4589,29 @@ void imports_give_back() {   // (pools_mu held)
     static bool ram_short = false;
     static uint64_t ram_avail = 0, ram_total = 0;
     if (ram_rule && calls % 256 == 0) {
+        // (Triforce, 11-12: Linux too. MEMORYSTATUSEX alone stopped the Linux build from v0.3.0 on. There: /proc/meminfo's
+        // MemTotal and MemAvailable, in kB; where neither is to be had the rule never fires)
+        uint64_t total = 0, avail = 0;
+        bool known = false;
+#ifdef _WIN32
         MEMORYSTATUSEX ms{};
         ms.dwLength = sizeof ms;
-        if (GlobalMemoryStatusEx(&ms)) {
-            ram_total = ms.ullTotalPhys, ram_avail = test_avail >= 0 ? (uint64_t)test_avail << 20 : ms.ullAvailPhys;
+        if (GlobalMemoryStatusEx(&ms)) total = ms.ullTotalPhys, avail = ms.ullAvailPhys, known = true;
+#else
+        if (FILE* f = fopen("/proc/meminfo", "r")) {
+            char line[128];
+            unsigned long long kb = 0;
+            int got = 0;
+            while (got != 3 && fgets(line, sizeof line, f)) {
+                if (sscanf(line, "MemTotal: %llu kB", &kb) == 1) total = (uint64_t)kb << 10, got |= 1;
+                else if (sscanf(line, "MemAvailable: %llu kB", &kb) == 1) avail = (uint64_t)kb << 10, got |= 2;
+            }
+            fclose(f);
+            known = got == 3;
+        }
+#endif
+        if (known) {
+            ram_total = total, ram_avail = test_avail >= 0 ? (uint64_t)test_avail << 20 : avail;
             // (Triforce, later on 11-11: 1.5 GB whatever the PC has, not 8% of it as well. On a 32 GB PC 8% is 2.6 GB, and a
             // player's session there sat at 2.2-2.6 GB available with nothing wrong: the rule fired 15 times in 3.5 minutes,
             // and 9 of the session's imports were of chunks it had given back, ~30 ms each on the replay thread)
@@ -5360,6 +5385,41 @@ void memory_end_submission(VkCommandBuffer cmd) {
                 logf("vk:   bound in guest memory, by pool (the GPU reads these over PCIe; binds and the bytes of their ranges over these 600 submits, "
                      "%.1f MB in all, a range counted once a submit): %s", all / 1048576.0, ds.c_str());
             }
+            // (Triforce, 11-12) A piece left in guest memory that turns out to cost much goes back into its mirror, for good.
+            // A trial decides in 90 frames, by the GPU's time then, that the pieces of a pool both sides write stay in guest
+            // memory; and a binding that reaches such a piece is bound whole in guest memory, whatever its size. A player's
+            // sessions (RTX 4070 SUPER): the 224 MB pool 0x108c000000 lost one 256 KB piece this way in a quiet moment (11.76 ms
+            // against 12.01), and from then on 383 bindings of ~74 MB each were read over PCIe every 600 submits, 17 to 46 GB
+            // against the usual 0.2 GB: 18 to 45 fps in fights for minutes, 60 to 100 frames over 40 ms every five seconds,
+            // and 3 to 5 GB for the rest of the session. Four of his session logs show it (medians of 4 to 25 GB), none of the
+            // lab's: its triforce_mirror_keep.txt held that pool from an earlier trial. Past RX_VK_DIRECT_MAX_MB (1024) of such
+            // bindings in 600 submits the pool's pieces are the mirror's again (made at their next binding), it is tried no
+            // more, and its start goes into triforce_mirror_keep.txt for later runs. Not while its trial runs. 0: off, as before
+            static const double direct_max_mb = getenv("RX_VK_DIRECT_MAX_MB") ? atof(getenv("RX_VK_DIRECT_MAX_MB")) : 1024.0;
+            if (direct_max_mb > 0)
+                for (const auto& [lo, bytes] : direct_bytes_by_pool) {
+                    if ((double)bytes < direct_max_mb * 1048576.0) continue;
+                    const auto it = imported.find(lo);
+                    if (it == imported.end()) continue;
+                    Pool& dp = it->second;
+                    if (!dp.mpieces || dp.mstate != Pool::MIRROR_ON || !dp.trial_bits.empty()) continue;
+                    std::vector<uint64_t> bits(dp.direct_bits.size());
+                    uint64_t pieces = 0;
+                    for (size_t w = 0; w < bits.size(); w++) {
+                        bits[w] = __atomic_load_n(&dp.direct_bits[w], __ATOMIC_RELAXED);
+                        pieces += (uint64_t)std::popcount(bits[w]);
+                    }
+                    if (!pieces) continue;
+                    pieces_set_direct(dp, bits, false);
+                    dp.demote_blocked = true, dp.demote_queued = false, dp.conflict_syncs = 0;
+                    std::fill(dp.conf_bits.begin(), dp.conf_bits.end(), 0ull);
+                    pools_gen++;
+                    mirror_keep_add(lo);
+                    logf("vk: pool %#llx (%llu MB): %llu KB of it were left in guest memory, and the bindings that reach them were %.0f MB "
+                         "read over PCIe in 600 submits: those pieces are mirrored again and the pool is tried no more "
+                         "(RX_VK_DIRECT_MAX_MB=%.0f; 0: off)", (unsigned long long)lo, (unsigned long long)((dp.hi - dp.lo) >> 20),
+                         (unsigned long long)((pieces << dp.piece_shift) >> 10), (double)bytes / 1048576.0, direct_max_mb);
+                }
             direct_by_pool.clear(), direct_bytes_by_pool.clear();
         }
     }

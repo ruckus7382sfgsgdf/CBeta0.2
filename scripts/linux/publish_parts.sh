@@ -1,6 +1,6 @@
 #!/bin/bash
 # Upload the Linux builder's parts (scripts/linux/make_parts.py) to the linux-parts release, which is not "latest".
-# A zip whose name is already there is left (its checksum is in the name). hookshot-linux.txt itself goes on the
+# A zip whose name is already there is left (its checksum is in the name). triforce-linux.txt itself goes on the
 # version release, with the AppImage. Run from CI on a tag, with GH_TOKEN and GITHUB_REPOSITORY.
 set -euo pipefail
 ROOT=$(cd "$(dirname "$0")/../.." && pwd)
