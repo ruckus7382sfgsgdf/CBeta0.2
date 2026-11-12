@@ -7,7 +7,8 @@ param(
     [Parameter(Mandatory = $true)][string]$Tag,
     [string]$Deps = 'D:\src\release\triforce-deps',
     [string]$Out = (Join-Path $PSScriptRoot 'out\release'),
-    [switch]$AllowNoCompiler
+    [switch]$AllowNoCompiler,
+    [switch]$AllowNoStateList
 )
 $ErrorActionPreference = 'Stop'
 $repo = Split-Path $PSScriptRoot
@@ -44,6 +45,17 @@ $work = Join-Path $tools 'work'
 New-Item -ItemType Directory -Force $work | Out-Null
 foreach ($n in 'hot_funcs.txt', 'hot_order.txt', 'hookshot_pieces.prof') {
     if (Test-Path (Join-Path $repo "work\$n")) { Copy-Item (Join-Path $repo "work\$n") $work }
+}
+# 3b. the pipeline state list (nx2/pipeline_states.py --out work\pipeline_states.bin <lists from play>): nx2/make_game.py puts it
+# beside the game as triforce_pipeline_states_shipped.bin and the first start builds its pipelines before the title. Without it
+# every player compiles each pipeline when it is first drawn: the stutter of every first visit (v0.2.0 shipped none: "0 shipped"
+# in every log). Hashes and draw state only, no game code.
+$states = Join-Path $repo 'work\pipeline_states.bin'
+if (Test-Path $states) {
+    Copy-Item $states $work
+    "work: pipeline state list, {0:N0} pipelines" -f (((Get-Item $states).Length - 12) / 528)
+} elseif (-not $AllowNoStateList) {
+    throw "no work\pipeline_states.bin: players would compile every pipeline in play. Make it with nx2/pipeline_states.py --out (or -AllowNoStateList)"
 }
 if (Test-Path (Join-Path $repo 'work\image')) { robocopy (Join-Path $repo 'work\image') (Join-Path $work 'image') /E /NFL /NDL /NJH /NJS /NP | Out-Null }
 

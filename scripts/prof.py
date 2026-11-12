@@ -29,8 +29,8 @@ def load_map(path, base):
 
 
 # The modules whose frames are Hookshot's own code (the game and the runtime, the renderer): Windows, then Linux
-GAME_MODS = ("hookshot.exe", "hookshot")
-VK_MODS = ("hookshot_vk.dll", "hookshot_vk.so")
+GAME_MODS = ("Triforce.exe", "hookshot.exe", "hookshot")   # (Triforce's names first; upstream's kept for its samples)
+VK_MODS = ("triforce_vk.dll", "hookshot_vk.dll", "hookshot_vk.so")
 RUN_MODS = GAME_MODS + VK_MODS
 
 
@@ -53,7 +53,7 @@ def load_symbols(folder=None):
     Windows build, the binaries of the Linux one"""
     folder = folder or os.environ.get("RX_MAPS", BUILD)
     maps = {}
-    for mod in ("hookshot_vk.dll", "hookshot.exe"):
+    for mod in ("triforce_vk.dll", "Triforce.exe", "hookshot_vk.dll", "hookshot.exe"):
         mp = os.path.join(folder, mod[:-4] + ".map")
         if os.path.exists(mp):
             maps[mod] = load_map(mp, 0x180000000 if mod.endswith(".dll") else 0x140000000)

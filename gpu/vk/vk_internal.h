@@ -210,6 +210,9 @@ void memory_drop_shadow(uint64_t guest, uint64_t size);   // (a write the captur
 /// when any write-back ever did
 uint64_t memory_writeback_value(uint64_t guest, uint64_t size, bool* ever);
 void memory_note_readback(uint64_t guest, uint64_t size);   // (PR 430) a CPU read of GPU results: see memory_rb_refresh
+/// (Triforce) around the write of an NVN event's word by a command buffer's signal: its write-back is not one the captures of
+/// its page wait for (vk_memory.cpp). This thread's bindings while on
+void memory_bind_event_write(bool on);
 bool memory_rb_refresh(VkCommandBuffer up);
 void memory_rb_recording_begun();   // (hookshot) at a recording's start, on its thread: the submission it joins (memory_rb_refresh)
 void memory_rb_segments_begin(uint64_t base, uint64_t n);   // (and a parallel replay's segments: their order, base on)
@@ -219,11 +222,12 @@ void memory_note_gpu_write(uint64_t gpu, uint64_t size);
 uint64_t vk_timeline_completed();
 void vk_timeline_wait(uint64_t v);
 uint32_t memory_generation();
+uintptr_t memory_stamp_who(uint64_t guest, uint32_t* gen, uintptr_t* anchor);   // (RX_VK_STAMP_SRC: who wrote that page last)
 /// 1: a page of [guest, guest + size) was written after generation gen; 0: none was
 bool memory_written_since(uint64_t guest, uint64_t size, uint32_t gen);
 void memory_stamp(uint64_t guest, uint64_t size);   // a write the watch does not see (GPU writes, host writes)
 /// The page runs of [guest, guest + size) written after gen, as byte ranges from guest (appended to out)
-void memory_written_runs(uint64_t guest, uint64_t size, uint32_t gen, std::vector<std::pair<uint64_t, uint64_t>>& out);
+void memory_written_runs(uint64_t guest, uint64_t size, uint32_t gen, std::vector<std::pair<uint64_t, uint64_t>>& out, bool tex = false);
 uint64_t memory_pages_collected();                  // (statistics)
 
 /// An NVN format as Vulkan stores it (vk_formats.cpp): ASTC is decoded to RGBA8, block_w x block_h
@@ -271,6 +275,19 @@ bool create_buffer(uint64_t size, VkBufferUsageFlags usage, bool host_visible, V
 void destroy_buffer(VkBuffer buffer, VmaAllocation allocation);
 /// A buffer in VRAM only (within the driver's budget), or false
 bool create_device_buffer(uint64_t size, VkBufferUsageFlags usage, VkBuffer& buffer, VmaAllocation& allocation, bool dedicated = false);
+/// (Triforce) device memory for a piece of a sparse buffer, and its release (vk_vma.cpp)
+bool vma_piece_alloc(uint64_t size, uint64_t alignment, uint32_t type_bits, VmaAllocation& allocation, VkDeviceMemory& memory,
+                     uint64_t& offset);
+void vma_piece_free(VmaAllocation allocation);
+/// (Triforce) the mirrors' pieces made resident in this recording, bound before it is submitted (vk_memory.cpp)
+void memory_mirror_binds_flush();
+bool memory_mirror_bind_wait(VkSemaphoreSubmitInfo* wait);   // (and the wait a queue submission makes for those binds)
+/// (Triforce, vk_memory.cpp) The memory handling played on NVIDIA cards only (mirrors in pieces, compacted textures): on there,
+/// and on trial on a card of another make until triforce_memtrial.txt says it passed or failed. tick: at the 600th presents;
+/// device_lost: from device_lost()
+bool memory_trial_on();
+void memory_trial_tick();
+void memory_trial_device_lost();
 /// Device-local memory this process uses and what the driver allows it now (VK_EXT_memory_budget), summed over the
 /// device-local heaps; false when unknown
 bool vram_usage(uint64_t* used, uint64_t* budget, uint64_t* block_free = nullptr);

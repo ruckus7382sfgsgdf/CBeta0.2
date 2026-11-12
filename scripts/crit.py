@@ -78,7 +78,7 @@ def main():
                 waits["%s: %s" % (th, guest_frame(frames))] += 1
             if not is_game(th):
                 vk["%s %s: %s" % (th, "runs" if r else "waits", frames[0] if not r else
-                                  next((f for f in frames if f.startswith("hookshot_vk:")), frames[0]))] += 1
+                                  next((f for f in frames if f.startswith(("triforce_vk:", "hookshot_vk:"))), frames[0]))] += 1
     for k, c in waits.most_common(top):
         print("  %5.1f%%  %s" % (100.0 * c / max(1, len(idle)), k))
     print("  (renderer threads then)")

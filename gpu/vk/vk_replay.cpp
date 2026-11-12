@@ -180,6 +180,8 @@ void queue_flush_locked() {   // (dev.present_mu held)
     si.pCommandBufferInfos = pend.cbs.data();
     si.signalSemaphoreInfoCount = n;
     si.pSignalSemaphoreInfos = sig;
+    VkSemaphoreSubmitInfo bind_wait;   // (Triforce: after the memory of the mirrors' new pieces is bound, vk_memory.cpp)
+    if (memory_mirror_bind_wait(&bind_wait)) si.waitSemaphoreInfoCount = 1, si.pWaitSemaphoreInfos = &bind_wait;
     PROF(PROF_QSUBMIT);
     const VkResult res = vkQueueSubmit2(dev.queue, 1, &si, VK_NULL_HANDLE);
     static int failures;
@@ -355,6 +357,8 @@ void submit_recording(Recording& r, bool signal_value = true, uint64_t signal_at
         return;
     }
     PROF(PROF_QSUBMIT);
+    VkSemaphoreSubmitInfo bind_wait;   // (Triforce: after the memory of the mirrors' new pieces is bound, vk_memory.cpp)
+    if (memory_mirror_bind_wait(&bind_wait)) si.waitSemaphoreInfoCount = 1, si.pWaitSemaphoreInfos = &bind_wait;
     const VkResult res = vkQueueSubmit2(dev.queue, 1, &si, r.fence);
     r.submitted = res == VK_SUCCESS;
     static int failures;
@@ -732,7 +736,9 @@ void replay(VkCommandBuffer& cmd, NvnState& s, const uint8_t* p, const uint8_t* 
             end_pass(cmd);
             GprofSpan gp(cmd, "event signal (barrier, write, barrier)");
             full_barrier(cmd);
+            memory_bind_event_write(true);   // (Triforce: not a write-back the captures of its page wait for)
             gpu_write(cmd, e.gpu, &v, 4);
+            memory_bind_event_write(false);
             break;
         }
         case NOP_WAIT_EVENT: {   // (a wait for an event another queue's work signals: submit_job orders them)
@@ -1282,9 +1288,75 @@ void maybe_split(VkCommandBuffer& cmd) {
 // (hookshot) One cause of those is gone: the dry pass did not mark the targets of a clear (NOP_CLEAR_COLOR in replay()). With
 // that, Castle Town's market and eight other places showed no black frame on 3 to 8 threads; the Kakariko walk was not run
 // again, so it stays off. On a 9950X3D the replay's wall time in the market goes from 10.9 ms a frame to 7.75 on 3 threads.
-int par_threads() {
-    static const int n = std::clamp(getenv("RX_VK_PARALLEL") ? atoi(getenv("RX_VK_PARALLEL")) : 0, 0, 8);
+// (Triforce) RX_VK_PARALLEL_AUTO=<n> (2 to 8): the parallel replay on <n> threads where it is the faster of the two, measured
+// as the game runs. On three threads it is faster where the replay is the frame's limit and slower where the GPU is: at the
+// Castle Town save 67.1 fps against 58.8 (RTX 4070 SUPER, 2560 x 1440, windowed), on a tour of Hyrule Field, Kakariko and
+// Lake Hylia 59.5 and 61.9 against 64.8 and 66.7 (its recordings done sooner, the game's thread only waits longer for the
+// GPU, and the dry pass and the hand-over are not free); the flicker counts of the frame log were the same either way.
+// par_tune_present tries the other way for a moment every so often and keeps the one whose frames are shorter.
+// RX_VK_PARALLEL=<n> still means always, as before.
+// EXPERIMENTAL, off unless asked for: its first runs (2026-11-11) gained nothing, 54.7 fps against 58.9 standing in Castle Town
+// and 60.4 against 61.7 on the tour. The frame time of a scene with a crowd moves by 2 ms within seconds (one trial read 18.59
+// and then 16.44 ms for the same way), more than the difference being measured, so the trials decide on noise
+int par_threads_max() {
+    static const int n = [] {
+        if (const char* e = getenv("RX_VK_PARALLEL")) return std::clamp(atoi(e), 0, 8);
+        if (const char* e = getenv("RX_VK_PARALLEL_AUTO")) return std::clamp(atoi(e), 0, 8);
+        return 0;
+    }();
     return n;
+}
+bool par_auto() {
+    static const bool v = !getenv("RX_VK_PARALLEL") && par_threads_max() >= 2;
+    return v;
+}
+bool par_auto_on = false;   // (the replay thread's: the parallel replay is the one in use now)
+int par_threads() {
+    const int n = par_threads_max();
+    return par_auto() && !par_auto_on ? 0 : n;
+}
+/// At each present (the replay thread): the tuner. Every kEvery presents it times kTake frames as they are, kTake the other way
+/// (after kSettle to settle) and kTake as they were again, and changes over when the other way's mean frame was at least 4%
+/// shorter than both: a scene that changed under the trial does not pass for a gain. Frames over 60 ms (a load) are left out
+void par_tune_present() {
+    if (!par_auto()) return;
+    constexpr int kEvery = 900, kTake = 80, kSettle = 24;
+    static auto last = std::chrono::steady_clock::now();
+    const auto now = std::chrono::steady_clock::now();
+    const double ms = std::chrono::duration<double, std::milli>(now - last).count();
+    last = now;
+    static int phase = 0, n = 0, cnt[3];
+    static double sum[3];
+    static int64_t frames = 0, next_trial = 600, st_trials = 0, st_changes = 0;
+    frames++;
+    if (phase == 0) {
+        if (frames < next_trial) return;
+        phase = 1, n = 0;
+        sum[0] = sum[1] = sum[2] = 0, cnt[0] = cnt[1] = cnt[2] = 0;
+        return;
+    }
+    const int k = phase - 1;
+    n++;
+    if (n > (phase == 1 ? 0 : kSettle) && ms <= 60.0) sum[k] += ms, cnt[k]++;
+    if (n < (phase == 1 ? kTake : kSettle + kTake)) return;
+    n = 0;
+    if (phase == 1) {
+        par_auto_on = !par_auto_on, phase = 2;
+    } else if (phase == 2) {
+        par_auto_on = !par_auto_on, phase = 3;
+    } else {
+        phase = 0, st_trials++;
+        const bool ok = cnt[0] >= kTake * 3 / 4 && cnt[1] >= kTake * 3 / 4 && cnt[2] >= kTake * 3 / 4;
+        const double a = cnt[0] ? sum[0] / cnt[0] : 0, b = cnt[1] ? sum[1] / cnt[1] : 0, c = cnt[2] ? sum[2] / cnt[2] : 0;
+        const bool better = ok && b < std::min(a, c) * 0.96;
+        if (better) par_auto_on = !par_auto_on, st_changes++;
+        next_trial = frames + (better ? kEvery : kEvery * 2);
+        if (better || st_trials <= 8 || st_trials % 20 == 0)
+            logf("vk: parallel replay, trial %lld: %s %.2f ms a frame, the other way %.2f, %s again %.2f: %s (%lld changes so far)",
+                 (long long)st_trials, par_auto_on != better ? "parallel" : "serial", a, b, par_auto_on != better ? "parallel" : "serial", c,
+                 better ? (par_auto_on ? "parallel from now on" : "serial from now on") : (ok ? "as it was" : "not measured (a load)"),
+                 (long long)st_changes);
+    }
 }
 struct ParPool {
     std::mutex mu;
@@ -1531,6 +1603,8 @@ const uint8_t* replay_handle(VkCommandBuffer& cmd, const uint8_t* h, bool may_st
         si.pCommandBufferInfos = cb;
         std::lock_guard lk(dev.present_mu);
         queue_flush_locked();
+        VkSemaphoreSubmitInfo bind_wait;   // (Triforce: after the memory of the mirrors' new pieces is bound, vk_memory.cpp)
+        if (memory_mirror_bind_wait(&bind_wait)) si.waitSemaphoreInfoCount = 1, si.pWaitSemaphoreInfos = &bind_wait;
         const VkResult res = vkQueueSubmit2(dev.queue, 1, &si, j->r->fence);
         j->r->submitted = res == VK_SUCCESS;
         if (res != VK_SUCCESS) logf("vk: segment submit %llu failed (%d)", (unsigned long long)j->r->value, (int)res);
@@ -2559,6 +2633,7 @@ uint32_t crc32(const uint8_t* p, size_t n, uint32_t c = 0xFFFFFFFFu) {
 /// closed (issue 1275: captures kept 25 -> 6527, staging 256 -> 1408 MB). Now the report once (a thread that sees the loss
 /// too waits for it, instead of ending the process before it is written), then the process ends as replay_fatal does
 [[noreturn]] void device_lost() {
+    memory_trial_device_lost();   // (Triforce: with the memory handling on trial on this card: off from the next start)
     static std::once_flag once;
     std::call_once(once, checkpoints_report);
     replay_fatal("the GPU device was lost (VK_ERROR_DEVICE_LOST): the driver stopped or reset the GPU, and nothing sent "
@@ -2837,7 +2912,8 @@ void status_tick() {
         std::string dir(exe, n);
         FILE* f = fopen((dir.substr(0, dir.find_last_of("\\/") + 1) + "triforce_frames.csv").c_str(), "w");
         if (f) fprintf(f, "frame,ms,pipe_waits,pipe_wait_ms,left_out,translate_ms,uploads,upload_mb,textures,memsync_ms,pipelines_ms,"
-                          "uploads_ms,programs_ms,slot_wait_ms,gpu_behind_ms,draw_ms,desc_ms,cmds_ms,tex_lookup_ms,textures_gone\n");
+                          "uploads_ms,programs_ms,slot_wait_ms,gpu_behind_ms,draw_ms,desc_ms,cmds_ms,tex_lookup_ms,textures_gone,"
+                          "dummies,draws\n");
         return f;
     }();
     if (trace && last_ns) {
@@ -2851,12 +2927,17 @@ void status_tick() {
         const auto dp = [](int i) { return (prof_ns[i] - l_prof[i]) / 1e6; };
         static uint64_t l_gone;
         const uint64_t gone = texture_destroy_generation();
-        fprintf(trace, "%llu,%.2f,%lld,%.2f,%lld,%.1f,%lld,%.2f,%zu,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%llu\n",
+        static int64_t l_dummy, l_draws;   // (Triforce: the bindings that sampled the dummy, and the draws, this frame)
+        const int64_t dummy = draw_dummy_textures();
+        int64_t draws_now = 0, sk_now = 0, di_now = 0, pl_now = 0;
+        draw_stats(&draws_now, &sk_now, &di_now, &pl_now);
+        fprintf(trace, "%llu,%.2f,%lld,%.2f,%lld,%.1f,%lld,%.2f,%zu,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%.2f,%llu,%lld,%lld\n",
                 (unsigned long long)frames, (now_ns - last_ns) / 1e6, (long long)(pw - l_pw), pwms - l_pwms, (long long)(ps - l_ps),
                 tr - l_tr, (long long)(up - l_up), (upb - l_upb) / 1048576.0, texture_count(), dp(PROF_MEMSYNC), dp(PROF_PIPE),
                 dp(PROF_UPLOAD), dp(PROF_PROGRAM), dp(PROF_SLOTWAIT), (st_wait_ns - l_wait) / 1e6, dp(PROF_DRAW), dp(PROF_DESC),
-                dp(PROF_CMDS), dp(PROF_TEXGET), (unsigned long long)(gone - l_gone));
-        l_gone = gone;
+                dp(PROF_CMDS), dp(PROF_TEXGET), (unsigned long long)(gone - l_gone), (long long)(dummy - l_dummy),
+                (long long)(draws_now - l_draws));
+        l_gone = gone, l_dummy = dummy, l_draws = draws_now;
         if (frames % 60 == 0) fflush(trace);
         l_ps = ps, l_pw = pw, l_pwms = pwms, l_up = up, l_upb = upb, l_tr = tr, l_wait = st_wait_ns;
         std::memcpy(l_prof, prof_ns, sizeof l_prof);
@@ -2964,6 +3045,7 @@ void do_present(const nvn_tex* t, const int crop[4]) {
         full_barrier(r.cmd);
         presents++;
         presents_now = presents;
+        par_tune_present();   // (Triforce: RX_VK_PARALLEL_AUTO)
         wide_sides_tick();
         if (presents == 1) hang_watch_start();
         {   // (EvilBoyce, diagnostics) RX_VK_WATCH_CPU=<present>:<gpu address>[,...] (hex addresses): from that present on, the
@@ -4178,7 +4260,7 @@ bool replay_start() {
         VkSemaphoreCreateInfo si{VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO};
         vkCreateSemaphore(dev.device, &si, nullptr, &f.acquired);
     }
-    if (par_threads() >= 2 && !init_pools_make(pi)) return false;   // (last: nothing after it fails and leaves them made)
+    if (par_threads_max() >= 2 && !init_pools_make(pi)) return false;   // (last: nothing after it fails and leaves them made)
     logf("vk: replay ready (%s; push descriptors %s (%u), extended dynamic state 3 %s, custom border colours %s)",
          dev.offscreen ? "offscreen" : "window", dev.push_descriptor ? "yes" : "no", dev.max_push_descriptors,
          dev.eds3_blend ? "yes" : "no", dev.custom_border_color ? "yes" : "no");

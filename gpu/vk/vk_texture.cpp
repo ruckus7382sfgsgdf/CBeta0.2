@@ -241,7 +241,21 @@ std::unordered_map<uint64_t, std::vector<Pooled>> target_pool;   // by pool_key_
 uint64_t pool_bytes, pool_n, st_pool_reused, st_pool_made, st_pool_destroyed;
 bool pool_pressed;   // (VRAM near what the driver allows: texture_frame's budget)
 bool compact_on() {   // (hookshot, RX_VK_COMPACT=1: the textures in a pool of their own, compacted: compact_step)
-    static const bool v = getenv("RX_VK_COMPACT") && atoi(getenv("RX_VK_COMPACT")) != 0;
+    // (Triforce) on by default on NVIDIA cards (RX_VK_COMPACT=0: off; =1: on, any card). Measured there: an RTX 4070 SUPER
+    // played with it since 2026-11-10 (a 584,000-present session, 132 compactions, no fault; 85 -> 80.6 fps after a six-area
+    // tour against 81 -> 64 without), and with the allowance held to 7300 MB (RX_VK_TEST_ALLOWED_MB, an 8 GB card's) a tour of
+    // Hyrule Field, Kakariko, Lake Hylia and Kokiri peaked at 7165 MB of VRAM against 8565 without (over the allowance in 2 of
+    // 12 reports against 11) at 69 fps against ~64. On an 8 GB card what is over the allowance is paged to system memory, and
+    // the textures and render targets evicted to get back under it are made and uploaded again, 58 to 190 ms a frame (an
+    // RX 5700 XT's and an RTX 3060's logs, 2026-11-11). Not measured on AMD or Intel: as it was there until someone does
+    // (Triforce, later that day) and on trial on the other makes' cards: memory_trial_on (vk_memory.cpp), which turns it off by
+    // itself on a PC where a session with it loses the GPU or two end in a crash
+    static const bool v = [] {
+        if (const char* e = getenv("RX_VK_COMPACT")) return atoi(e) != 0;
+        const bool on = memory_trial_on();
+        if (on) logf("vk: the textures' VRAM is compacted (RX_VK_COMPACT=0: off)");
+        return on;
+    }();
     return v;
 }
 uint64_t pool_cap() {
@@ -1297,6 +1311,7 @@ struct UpSlow { int64_t ns; uint32_t w, h, layers, nvn; int route; uint64_t byte
 std::vector<UpSlow> up_slowest;
 std::mutex up_mu;   // (uploads may come from a parallel replay's threads)
 std::atomic<int64_t> frame_upload_ns{0};   // (this frame's time in upload(), every thread's)
+std::atomic<int> frame_astc_admitted{0};   // (Triforce: this frame's new ASTC textures asked about so far: upload_defer)
 std::atomic<int64_t> st_deferred{0}, st_deferred_frame{0};
 void upload_frame_report() {
     std::lock_guard lk(up_mu);
@@ -1589,11 +1604,13 @@ bool upload_inner(Texture& tex, const Ranges* dirty) {
 
 /// What the CPU wrote of a texture's storage since gen, as byte ranges from its start. A texture in a virtual
 /// (sparse) pool is looked at page by page through its mapping, and is all dirty when its mapping changed.
-bool texture_dirty(Texture& tex, uint32_t gen, Ranges& out) {
+/// same_ok (Triforce): a capture's stamp of a page with the bytes of its last copy is no write (vk_memory.cpp page_gen_tex): only
+/// for an uploaded texture's "written since my upload?"
+bool texture_dirty(Texture& tex, uint32_t gen, Ranges& out, bool same_ok = false) {
     out.clear();
     constexpr uint64_t kVirtual = 1ull << 40, kVPage = 1ull << 16;
     if (tex.gpu < kVirtual) {
-        memory_written_runs(tex.guest, tex.guest_size, gen, out);
+        memory_written_runs(tex.guest, tex.guest_size, gen, out, same_ok);
         return !out.empty();
     }
     // (the page walk only when the GPU mappings changed: the terrain's sparse arrays span over 1 GB, 64 KB pages,
@@ -1661,7 +1678,7 @@ bool texture_dirty(Texture& tex, uint32_t gen, Ranges& out) {
     const size_t remaps = out.size();
     for (const Texture::Run& r : tex.runs) {
         in_run.clear();
-        memory_written_runs(r.guest, r.n, gen, in_run);
+        memory_written_runs(r.guest, r.n, gen, in_run, same_ok);
         for (const auto& [lo, hi] : in_run) {
             if (out.size() > remaps && out.back().second == r.off + lo) out.back().second = r.off + hi;
             else out.push_back({r.off + lo, r.off + hi});
@@ -1693,6 +1710,14 @@ void destroy_later(Texture& tex) {
     }
     d.memory = tex.sparse_chunks;
     dead.push_back(std::move(d));
+    if (tex.twin3d) {   // (Triforce: its one-slice 3D copy goes with it)
+        Dead t{tex.last_value, tex.twin3d, tex.twin3d_alloc, {}, {}};
+        for (auto& kv : tex.twin3d_views)
+            if (kv.second) t.views.push_back(kv.second);
+        dead.push_back(std::move(t));
+        tex.twin3d = VK_NULL_HANDLE, tex.twin3d_alloc = nullptr;
+        tex.twin3d_views.clear();
+    }
     total_bytes -= std::min(total_bytes, tex.bytes + tex.pad);
 }
 
@@ -2175,6 +2200,7 @@ VkCommandBuffer upload_command_buffer() {
 }
 bool texture_uploads_recorded() {
     if (memory_rb_refresh(up_cmd)) up_used = true;   // (PR 430: readback pages from guest memory, last of the uploads)
+    memory_mirror_binds_flush();   // (Triforce: the memory of the mirrors' new pieces, bound before this recording is submitted)
     memory_table_flush();   // (vk_memory.cpp: the page table's changes, after this recording's mirror copies)
     if (up_used) full_barrier(up_cmd);   // (before the recording that reads them)
     return up_used;
@@ -2315,6 +2341,13 @@ namespace {
 bool upload_defer(const Texture& tex) {
     static const int64_t budget_ns = (int64_t)(getenv("RX_VK_UPLOAD_BUDGET_MS") ? atof(getenv("RX_VK_UPLOAD_BUDGET_MS")) : 40.0) * 1000000;
     if (!budget_ns || !upload_defer_ok || tex.uploaded || !tex.astc || tex.gpu_written) return false;
+    // (Triforce) and the first RX_VK_UPLOAD_MIN_ASTC of a frame (24) are never left for later. The budget counts every upload of
+    // the frame, and a frame whose other uploads took it all left every new ASTC texture on the placeholder: on a card at its
+    // VRAM allowance the render targets evicted and made again are uploaded from memory on the CPU, 58 to 190 ms a frame for
+    // frames on end (an RX 5700 XT's log, 2026-11-11: 8,586 textures left for later in one session), and the materials stayed
+    // flat white or blue for as long as that went on. An ASTC upload is decoded on the GPU: its part of such a frame is small
+    static const int min_astc = getenv("RX_VK_UPLOAD_MIN_ASTC") ? std::max(0, atoi(getenv("RX_VK_UPLOAD_MIN_ASTC"))) : 24;
+    if (frame_astc_admitted.fetch_add(1, std::memory_order_relaxed) < min_astc) return false;
     if (frame_upload_ns.load(std::memory_order_relaxed) < budget_ns) return false;
     st_deferred.fetch_add(1, std::memory_order_relaxed), st_deferred_frame.fetch_add(1, std::memory_order_relaxed);
     return true;
@@ -2402,7 +2435,7 @@ Texture* texture_touch(Texture* tex, bool for_sampling) {
                  "%llu)", tex->id, (unsigned long long)tex->gpu, tex->width, tex->height, tex->layers, tex->nvn_format,
                  (unsigned long long)frame_no, (unsigned long long)tex->last_written);
     }
-    if (tex->uploaded && !gpu_dirty && !texture_dirty(*tex, since, dirty)) return tex;
+    if (tex->uploaded && !gpu_dirty && !texture_dirty(*tex, since, dirty, !tex->gpu_written)) return tex;
     const uint32_t gen = memory_generation();
     // (storage render targets took last, which the CPU has not written since: nothing to upload, the memory holds
     // nothing the GPU's images did not replace. The game's transient heaps move with the dynamic resolution, and a
@@ -2488,6 +2521,35 @@ Texture* texture_touch(Texture* tex, bool for_sampling) {
     // (hookshot) a BC3 image whose last upload failed waits before the next try: its upload stages the whole ASTC source (some
     // 200 MB for a terrain array), not to be repeated every submission while the memory it needs is not there
     if (tex->bc && !tex->uploaded && tex->bc_retry_frame > frame_no) return tex;
+    // (Triforce, RX_VK_STAMP_SRC=1, a diagnostic: a texture of 1 MB or more uploaded again: who wrote its first dirty page (the
+    // write watch 1, a capture 2, else a caller of memory_stamp, placed by memory_stamp's own address), and whether its memory
+    // holds other bytes than at its last upload at all. 400 lines)
+    static const bool stamp_src = getenv("RX_VK_STAMP_SRC") != nullptr;
+    if (stamp_src && tex->uploaded && tex->guest_size >= (1u << 20)) {
+        static int told;
+        static std::unordered_map<uint32_t, int> times;   // (RX_VK_STAMP_SRC=<n>: only a texture's n-th such upload and later)
+        static const int from_nth = std::max(1, atoi(getenv("RX_VK_STAMP_SRC")));
+        const uint64_t h = guest_hash(*tex);
+        if (++times[tex->id] >= from_nth && told++ < 400) {
+            uint64_t part = 0;
+            for (const auto& r : dirty) part += r.second - r.first;
+            const uint64_t off = dirty.empty() ? 0 : dirty[0].first;
+            const uint64_t guest = tex->gpu < (1ull << 40) ? tex->guest + off : host->gpu_guest(tex->gpu + off);
+            uint32_t pg = 0;
+            uintptr_t anchor = 0;
+            const uintptr_t who = guest ? memory_stamp_who(guest, &pg, &anchor) : 0;
+            logf("vk: stamp src: #%u %#llx %ux%u x%u NVN %#x uploaded again (%d) at frame %llu: %llu of %llu KB dirty in %zu ranges%s; bytes %s; "
+                 "page %#llx gen %u (uploaded at %u) by %s%+lld", tex->id, (unsigned long long)tex->gpu, tex->width, tex->height,
+                 tex->layers, tex->nvn_format, times[tex->id], (unsigned long long)frame_no, (unsigned long long)(part >> 10),
+                 (unsigned long long)(tex->guest_size >> 10), dirty.size(), gpu_dirty ? " (a GPU buffer wrote it)" : "",
+                 !tex->verify_hash ? "not hashed before" : h == tex->verify_hash ? "THE SAME as at its last upload" : "changed",
+                 (unsigned long long)guest, pg, since, who == 1 ? "the write watch" : who == 2 ? "a capture" : who ? "memory_stamp" : "unknown",
+                 who > 2 ? (long long)(who - anchor) : 0ll);
+        }
+        tex->verify_hash = h;
+    } else if (stamp_src && tex->guest_size >= (1u << 20)) {
+        tex->verify_hash = guest_hash(*tex);
+    }
     const auto up0 = std::chrono::steady_clock::now();
     const bool up_ok = upload(*tex, partial || sparse_written ? &dirty : nullptr);
     {   // (an upload over 15 ms: what it was, 60 of them)
@@ -2565,6 +2627,84 @@ Texture* texture_touch(Texture* tex, bool for_sampling) {
     return tex;
 }
 
+/// (Triforce, 2026-11-11) A flat texture sampled by a program whose instruction is a 3D sample: a one-slice 3D image with its
+/// texels, and a 3D view of that. Vulkan has no 3D view of a 2D image, so such a binding had no view and read zeros (a null
+/// descriptor). The console's GPU samples by the texture's own header whatever the instruction says: a flat texture's texel at
+/// (u, v), the third coordinate unused, which a one-slice 3D image gives for any w. OoT's water in Zora's River binds one of
+/// the game's 4 x 4 textures so (slot 0x102, 44 lookups in 10 s; its ripples ran in slow motion). Small plain textures only:
+/// one layer copied, up to 1024 x 1024, not depth, not kept as BC3. Copied again at a lookup after the texture's contents
+/// changed (an upload, or the GPU writing it): the lookups are cached by slot, so one the GPU draws every frame is a frame or
+/// more behind here. RX_VK_NO_TWIN3D=1: no such view, as before
+VkImageView twin3d_view(Texture* tex, VkFormat f, uint32_t level0, uint32_t nlevels, uint32_t layer, const VkComponentMapping& cm) {
+    static const bool off = getenv("RX_VK_NO_TWIN3D") != nullptr;
+    if (off || tex->type != VK_IMAGE_TYPE_2D || tex->sparse || tex->bc || tex->samples != VK_SAMPLE_COUNT_1_BIT ||
+        tex->aspect != VK_IMAGE_ASPECT_COLOR_BIT || is_bc(tex->format) || is_astc(tex->format) ||
+        (uint64_t)tex->width * tex->height > 1024ull * 1024 || !tex->image)
+        return VK_NULL_HANDLE;
+    VkCommandBuffer cmd = VK_NULL_HANDLE;
+    if (!tex->twin3d) {
+        VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+        ci.imageType = VK_IMAGE_TYPE_3D;
+        ci.format = tex->format;
+        ci.extent = {tex->width, tex->height, 1};
+        ci.mipLevels = tex->levels;
+        ci.arrayLayers = 1;
+        ci.samples = VK_SAMPLE_COUNT_1_BIT;
+        ci.tiling = VK_IMAGE_TILING_OPTIMAL;
+        ci.usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        ci.flags = VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT;   // (the view's format may be another of its class: sRGB or not)
+        if (!create_image(ci, tex->twin3d, tex->twin3d_alloc, false, false, false)) {
+            tex->twin3d = VK_NULL_HANDLE, tex->twin3d_alloc = nullptr;
+            return VK_NULL_HANDLE;
+        }
+        cmd = upload_cmd();
+        VkImageMemoryBarrier2 b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2};
+        b.srcStageMask = b.dstStageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+        b.dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT;
+        b.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED, b.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        b.srcQueueFamilyIndex = b.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+        b.image = tex->twin3d;
+        b.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, VK_REMAINING_MIP_LEVELS, 0, 1};
+        VkDependencyInfo di{VK_STRUCTURE_TYPE_DEPENDENCY_INFO};
+        di.imageMemoryBarrierCount = 1, di.pImageMemoryBarriers = &b;
+        vkCmdPipelineBarrier2(cmd, &di);
+        tex->twin3d_value = ~0ull, tex->twin3d_written = ~0ull;
+        static int told;
+        if (told++ < 12)
+            logf("vk: texture #%u %#llx %ux%u levels %u NVN %#x is sampled as a 3D texture: a one-slice 3D copy of it made", tex->id,
+                 (unsigned long long)tex->gpu, tex->width, tex->height, tex->levels, tex->nvn_format);
+    }
+    if (tex->twin3d_value != tex->upload_value || tex->twin3d_written != tex->last_written || tex->twin3d_layer != layer) {
+        if (!cmd) cmd = upload_cmd();
+        full_barrier(cmd, "barrier (a flat texture's 3D copy: before)");
+        std::vector<VkImageCopy> rs;
+        for (uint32_t l = 0; l < tex->levels; l++) {
+            VkImageCopy r{};
+            r.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l, layer, 1};
+            r.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, l, 0, 1};
+            r.extent = {std::max(1u, tex->width >> l), std::max(1u, tex->height >> l), 1};
+            rs.push_back(r);
+        }
+        vkCmdCopyImage(cmd, tex->image, VK_IMAGE_LAYOUT_GENERAL, tex->twin3d, VK_IMAGE_LAYOUT_GENERAL, (uint32_t)rs.size(), rs.data());
+        full_barrier(cmd, "barrier (a flat texture's 3D copy: after)");
+        tex->twin3d_value = tex->upload_value, tex->twin3d_written = tex->last_written, tex->twin3d_layer = layer;
+    }
+    uint64_t key = mix((uint64_t)f, (uint64_t)level0 << 32 | nlevels);
+    key = mix(key, (uint64_t)cm.r << 24 | (uint64_t)cm.g << 16 | (uint64_t)cm.b << 8 | cm.a);
+    const auto it = tex->twin3d_views.find(key);
+    if (it != tex->twin3d_views.end()) return it->second;
+    VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
+    vi.image = tex->twin3d;
+    vi.viewType = VK_IMAGE_VIEW_TYPE_3D;
+    vi.format = f;
+    vi.components = cm;
+    vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, level0, nlevels, 0, 1};
+    VkImageView view = VK_NULL_HANDLE;
+    if (vkCreateImageView(dev.device, &vi, nullptr, &view) != VK_SUCCESS) view = VK_NULL_HANDLE;
+    tex->twin3d_views[key] = view;
+    return view;
+}
+
 VkImageView texture_view(Texture* tex, const nvn_tex* t, const nvn_view* v, VkImageViewType type, ViewUse use,
                          VkFormat* format_out, VkFormat force_format) {
     if (!tex) return VK_NULL_HANDLE;
@@ -2615,6 +2755,7 @@ VkImageView texture_view(Texture* tex, const nvn_tex* t, const nvn_view* v, VkIm
         else if (type == VK_IMAGE_VIEW_TYPE_2D && nlayers > 1) nlayers = 1;
         else if (type == VK_IMAGE_VIEW_TYPE_1D && nlayers > 1) nlayers = 1;
     }
+    int twin_layer = -1;   // (Triforce: a flat texture wanted as 3D: the layer its 3D copy is of)
     // the shader's type over the image's: what Vulkan allows of them
     switch (type) {
     case VK_IMAGE_VIEW_TYPE_1D: case VK_IMAGE_VIEW_TYPE_1D_ARRAY:
@@ -2636,7 +2777,11 @@ VkImageView texture_view(Texture* tex, const nvn_tex* t, const nvn_view* v, VkIm
         if (type == VK_IMAGE_VIEW_TYPE_2D) nlayers = 1;
         break;
     case VK_IMAGE_VIEW_TYPE_3D:
-        if (tex->type != VK_IMAGE_TYPE_3D) return VK_NULL_HANDLE;
+        if (tex->type != VK_IMAGE_TYPE_3D) {
+            // (Triforce: a flat texture sampled as a 3D one: its one-slice 3D copy, twin3d_view above)
+            if (use != ViewUse::Sample) return VK_NULL_HANDLE;
+            twin_layer = (int)layer0;
+        }
         layer0 = 0, nlayers = 1;
         break;
     case VK_IMAGE_VIEW_TYPE_CUBE: case VK_IMAGE_VIEW_TYPE_CUBE_ARRAY:
@@ -2674,6 +2819,10 @@ VkImageView texture_view(Texture* tex, const nvn_tex* t, const nvn_view* v, VkIm
             logf("vk: sampled view of #%u NVN %#x as vk %d: swizzle %u %u %u %u (descriptor %u %u %u %u, view %d)", tex->id,
                  nf, (int)f, sw[0], sw[1], sw[2], sw[3], d.swizzle_r, d.swizzle_g, d.swizzle_b, d.swizzle_a,
                  v && v->set_swizzle ? 1 : 0);
+    }
+    if (twin_layer >= 0) {
+        if (format_out) *format_out = f;
+        return twin3d_view(tex, f, level0, nlevels, (uint32_t)twin_layer, cm);
     }
     uint64_t key = mix((uint64_t)use, (uint64_t)type);
     key = mix(key, (uint64_t)f << 32 | aspect);
@@ -3948,6 +4097,7 @@ uint64_t preset_texture_budget(uint64_t preset_mb, bool preset_applies, bool vra
 void texture_frame(uint64_t completed) {
     upload_frame_report();
     frame_upload_ns.store(0, std::memory_order_relaxed);
+    frame_astc_admitted.store(0, std::memory_order_relaxed);
     if (const int64_t d = st_deferred_frame.exchange(0, std::memory_order_relaxed)) {
         // (the views and descriptor sets resolved to the placeholder this frame go stale, as when textures go: the next frame
         // looks those textures up again, and uploads them)
@@ -4129,6 +4279,7 @@ void texture_frame(uint64_t completed) {
     }
     if (budget < evict_to) evict_to = 0;   // (hookshot, RX_VK_COMPACT: the driver's limit asks for more: 7/8 of that, as before)
     if (frame_no % 600 == 0) {
+        memory_trial_tick();   // (Triforce: the memory handling on trial on this card, vk_memory.cpp)
         vma_log_heaps();
         vma_log_image_blocks();
         {

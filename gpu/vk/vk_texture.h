@@ -90,6 +90,13 @@ struct Texture {
     uint64_t wb_value = 0;        // (the submission whose own commands write its texels into its memory; 0: none)
     uint64_t pool_key = 0;    // (a render target's image: its create info's key in the pool it goes to when the texture does)
     std::unordered_map<uint64_t, VkImageView> views;
+    // (Triforce) a flat texture a program samples as a 3D one: its one-slice 3D copy (vk_texture.cpp twin3d_view), the layer it
+    // was copied from and the texture's contents it was copied at
+    VkImage twin3d = VK_NULL_HANDLE;
+    VmaAllocation twin3d_alloc = nullptr;
+    uint32_t twin3d_layer = 0;
+    uint64_t twin3d_value = ~0ull, twin3d_written = ~0ull;
+    std::unordered_map<uint64_t, VkImageView> twin3d_views;
 };
 
 /// Makes texels [x, x + w) x [y, y + h) of level `level`, layers [first, first + count), of a sparse texture resident

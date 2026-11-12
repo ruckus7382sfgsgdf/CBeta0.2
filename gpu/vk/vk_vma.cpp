@@ -182,7 +182,40 @@ bool image_compact_pass_end(uint64_t* freed_bytes, uint32_t* freed_blocks) {
     return compact_over(freed_bytes, freed_blocks);
 }
 
+bool create_image_inner(const VkImageCreateInfo& ci, VkImage& image, VmaAllocation& allocation, bool dedicated, bool target, bool textures);
+/// (Triforce) An image that takes over 3 ms to make: what it was, how long, and whether its pool took a new block for it (60
+/// lines). A player's session had frames of 50 to 150 ms in play that were all "texture lookups", 24 render targets made in one
 bool create_image(const VkImageCreateInfo& ci, VkImage& image, VmaAllocation& allocation, bool dedicated, bool target, bool textures) {
+    const auto blocks = [&]() -> uint32_t {
+        VmaPool pool = textures ? texture_pool : target ? target_image_pool : image_pool;
+        if (!pool) return 0;
+        VmaStatistics st{};
+        vmaGetPoolStatistics(vma, pool, &st);
+        return st.blockCount;
+    };
+    const uint32_t before = blocks();
+    const auto t0 = std::chrono::steady_clock::now();
+    const bool ok = create_image_inner(ci, image, allocation, dedicated, target, textures);
+    const double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
+    static std::atomic<int> told{0};
+    static std::atomic<int64_t> n{0}, slow{0};
+    static std::atomic<int64_t> slow_us{0};
+    n++;
+    if (ms > 3.0) {
+        slow++, slow_us += (int64_t)(ms * 1000);
+        if (told++ < 60) {
+            uint64_t used = 0, allowed = 0, block_free = 0;
+            vram_usage(&used, &allowed, &block_free);
+            logf("vk: an image took %.1f ms to make: %ux%u x%u levels %u format %d (%s)%s; its pool's blocks %u -> %u; VRAM %llu of %llu "
+                 "MB, %llu MB free in the blocks; %lld of %lld images so far took over 3 ms (%.0f ms in all)", ms, ci.extent.width,
+                 ci.extent.height, ci.arrayLayers, ci.mipLevels, (int)ci.format, textures ? "a texture" : target ? "a render target" : "other",
+                 ok ? "" : ", NOT made", before, blocks(), (unsigned long long)(used >> 20), (unsigned long long)(allowed >> 20),
+                 (unsigned long long)(block_free >> 20), (long long)slow.load(), (long long)n.load(), slow_us.load() / 1000.0);
+        }
+    }
+    return ok;
+}
+bool create_image_inner(const VkImageCreateInfo& ci, VkImage& image, VmaAllocation& allocation, bool dedicated, bool target, bool textures) {
     VmaAllocationCreateInfo ai{};
     ai.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE;
     // (in VRAM or not at all: an image VMA puts in system memory when VRAM is full is read over PCIe every frame,
@@ -277,6 +310,23 @@ bool create_device_buffer(uint64_t size, VkBufferUsageFlags usage, VkBuffer& buf
     if (dev.memory_budget) ai.flags = VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
     if (dedicated) ai.flags |= VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
     return vmaCreateBuffer(vma, &bi, &ai, &buffer, &allocation, nullptr) == VK_SUCCESS;
+}
+/// (Triforce) Device memory for a piece of a sparse buffer (vk_memory.cpp's mirrors in pieces): size bytes at that alignment,
+/// of a type in type_bits, within the driver's budget; the memory and the offset in it to bind
+bool vma_piece_alloc(uint64_t size, uint64_t alignment, uint32_t type_bits, VmaAllocation& allocation, VkDeviceMemory& memory,
+                     uint64_t& offset) {
+    VkMemoryRequirements req{};
+    req.size = size, req.alignment = alignment, req.memoryTypeBits = type_bits;
+    VmaAllocationCreateInfo ai{};
+    ai.requiredFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    if (dev.memory_budget) ai.flags = VMA_ALLOCATION_CREATE_WITHIN_BUDGET_BIT;
+    VmaAllocationInfo info{};
+    if (vmaAllocateMemory(vma, &req, &ai, &allocation, &info) != VK_SUCCESS) return false;
+    memory = info.deviceMemory, offset = info.offset;
+    return true;
+}
+void vma_piece_free(VmaAllocation allocation) {
+    vmaFreeMemory(vma, allocation);
 }
 /// (every heap: what VMA has in blocks and allocations there, what the process uses of it, its budget; one line)
 /// The image pools: their blocks, the images in them, and the free ranges between them (every 600 presents, with the heaps)

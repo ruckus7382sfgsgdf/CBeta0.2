@@ -1190,11 +1190,46 @@ void state_record(const Program& p, const NvnState& s, const Targets& at, VkPrim
     if (!state_file) state_open_locked();
     if (state_file && state_seen.insert(h).second) fwrite(&r, sizeof r, 1, state_file), fflush(state_file);
 }
+/// (perf push 11-11) Which shipped list this folder's notes were last made from, in triforce_states_applied.bin: the list's
+/// contents and the translator, hashed. The lists were gone through only inside a prepare (a first start, a new translator, a
+/// new seed): a folder prepared already that got a longer shipped list (an update with the same translator, a list copied in)
+/// never noted its pipelines, and built each in play when first drawn (a lab folder with a 12067-pipeline list: 2687 built in
+/// play, the list not read once). 0: there is no shipped list
+uint64_t state_shipped_id() {
+    FILE* f = fopen(state_list_path("triforce_pipeline_states_shipped.bin").c_str(), "rb");
+    if (!f) return 0;
+    uint64_t h = 0xCBF29CE484222325ull ^ program_cache_stamp(), total = 0;
+    std::vector<uint8_t> buf(1 << 16);
+    for (size_t n; (n = fread(buf.data(), 1, buf.size(), f)) > 0; total += n)
+        for (size_t i = 0; i < n; i++) h = (h ^ buf[i]) * 1099511628211ull;
+    fclose(f);
+    return total > 12 ? (h | 1) : 0;
+}
+/// Whether the shipped list is one the notes were not made from yet
+bool state_shipped_new() {
+    if (getenv("RX_VK_NO_STATE_LIST")) return false;
+    const uint64_t id = state_shipped_id();
+    if (!id) return false;
+    uint64_t had = 0;
+    if (FILE* f = fopen(state_list_path("triforce_states_applied.bin").c_str(), "rb")) {
+        if (fread(&had, 8, 1, f) != 1) had = 0;
+        fclose(f);
+    }
+    return had != id;
+}
 /// (prepare_run, the seed open) every pipeline of the state lists (the player's own and the shipped one): its program translated
 /// when the program cache lacks it, then noted in triforce_pipelines.bin for precompile_run to build. RX_VK_NO_STATE_LIST=1: off
 void state_list_prepare(void (*progress)(size_t done, size_t total)) {
     if (getenv("RX_VK_NO_STATE_LIST")) return;
     const auto t0 = std::chrono::steady_clock::now();
+    const uint64_t shipped_id = state_shipped_id();
+    struct Applied {   // (written when the lists were gone through, however this returns)
+        uint64_t id;
+        ~Applied() {
+            if (!id) return;
+            if (FILE* f = fopen(state_list_path("triforce_states_applied.bin").c_str(), "wb")) fwrite(&id, 8, 1, f), fclose(f);
+        }
+    } applied{shipped_id};
     std::vector<StateRec> recs = state_list_read(state_list_path("triforce_pipeline_states_shipped.bin"));
     const size_t shipped = recs.size();
     for (const StateRec& r : state_list_read(state_list_path("triforce_pipeline_states.bin"))) recs.push_back(r);
@@ -1220,6 +1255,9 @@ void state_list_prepare(void (*progress)(size_t done, size_t total)) {
         rec_program[i] = it->second;
     }
     std::atomic<size_t> next{0}, made{0}, missing{0};
+    // (perf push 11-11: why a program of the list has no key. 0 a header-only stage, 1 mesh on a GPU without, 2 a stage the
+    // seed lacks or has as another kind. Measured on OoT: all 2178 of 6150 are the last, vertex and fragment both absent)
+    std::atomic<size_t> why_missing[3]{};
     const auto worker = [&] {
         ub_thread_off();   // (a background thread: see ub_thread_off; the pipeline state list's builds raced the replay's updates)
         SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_BELOW_NORMAL);
@@ -1230,7 +1268,15 @@ void state_list_prepare(void (*progress)(size_t done, size_t total)) {
             std::unique_ptr<Program> p;
             // (a mesh program on a GPU without mesh shaders is not made; one with a header-only stage is made in play)
             if (!r.code[3] && (!r.mesh || dev.mesh_shader)) p = seed_program_of(r.code, r.mesh != 0, r.vattr, r.color_types, &want[i].key);
-            if (!want[i].key) missing++;
+            if (!want[i].key) {
+                missing++;
+                why_missing[r.code[3] ? 0 : r.mesh && !dev.mesh_shader ? 1 : 2]++;
+                static std::atomic<int> told{0};
+                if (getenv("RX_VK_SEED_CHECK") && told++ < 40)
+                    logf("vk: state list: no key for %016llx %016llx %016llx %016llx mesh %u",
+                         (unsigned long long)r.code[0], (unsigned long long)r.code[1], (unsigned long long)r.code[2],
+                         (unsigned long long)r.code[3], r.mesh);
+            }
             if (p) {
                 if (!p->failed) made++;
                 for (Stage& st : p->stages)
@@ -1311,6 +1357,10 @@ void state_list_prepare(void (*progress)(size_t done, size_t total)) {
          "by their textures (%zu made), %zu noted, %zu whose program variant was not made, in %.1f s", recs.size(), shipped,
          want.size(), made.load(), missing.load(), variant_of.size(), variants_made.load(), noted_n, no_variant,
          std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count());
+    if (missing.load())
+        logf("vk: state list: the %zu programs without a key: %zu with a header-only stage, %zu mesh (none on this GPU), %zu with a "
+             "stage the game's shader list lacks (made in play)", missing.load(), why_missing[0].load(), why_missing[1].load(),
+             why_missing[2].load());
 }
 
 // ---- (hookshot) Stage libraries, as TotK Recomp's runtime/vk_pipeline.c: the part of a pipeline that costs is its shaders, and with
@@ -2060,8 +2110,10 @@ struct HandleHit {
     uint64_t destroy_gen;
     bool sampling;    // (its use reads the texture's contents)
     uint64_t tex_epoch;   // (the texture epoch it was last touched in)
+    bool known = true;    // (Triforce: the slot is registered: with no view, a texture whose image is not there yet)
 };
 TLS_OBJECT(handle_hits, std::unordered_map<uint64_t, HandleHit>)
+thread_local bool view_slot_known = true;   // (Triforce: the last texture_view_of's slot was a registered one)
 // (hookshot) RX_VK_TRACE_TEX=<w>x<h>,...: each draw sampling a texture of that size is logged with its state, every 30th frame, 600 lines: a
 // model that does not show is found by its textures, and whether the game draws it, and how, read from the line
 thread_local const Texture* trace_tex_hit = nullptr;
@@ -2125,6 +2177,7 @@ VkImageView texture_view_of(uint32_t handle, VkImageViewType want, ViewUse use, 
         }
         if (tex_out) *tex_out = it->second.tex;
         if (level_out) *level_out = it->second.level;
+        view_slot_known = it->second.known;
         return it->second.view;
     }
     ParLock lk;
@@ -2141,6 +2194,31 @@ VkImageView texture_view_of(uint32_t handle, VkImageViewType want, ViewUse use, 
         if (tex) level = image_level(tex, has_view ? view_level(&v) : 0);
     }
     if (!view) {   // (what a shader reads as the dummy instead: once per texture slot)
+        {   // (Triforce, diagnostics) RX_VK_LOG_DUMMY=1: every 10 s, the slots that were resolved to the dummy in the last second
+            static const bool log_dummy = getenv("RX_VK_LOG_DUMMY") != nullptr;
+            if (log_dummy) {
+                struct Seen { int64_t n = 0; std::chrono::steady_clock::time_point last; char desc[200]; };
+                static std::unordered_map<uint32_t, Seen> seen;
+                static auto next = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+                const auto now = std::chrono::steady_clock::now();
+                Seen& d = seen[handle & 0xFFFFF];
+                d.n++, d.last = now;
+                if (!known) snprintf(d.desc, sizeof d.desc, "not registered");
+                else snprintf(d.desc, sizeof d.desc, "%s; target %d format %#x %ux%ux%u levels %u gpu %#llx view %s (format %#x target %d) want %d use %d",
+                              tex ? "no view of it" : "no image for it", t.d.target, t.d.format, t.d.width, t.d.height, t.d.depth, t.d.levels,
+                              (unsigned long long)t.gpu, has_view ? "yes" : "no", has_view && v.set_format ? v.format : 0,
+                              has_view && v.set_target ? v.target : -1, (int)want, (int)use);
+                if (now >= next) {
+                    next = now + std::chrono::seconds(10);
+                    int k = 0;
+                    for (auto& [slot, e] : seen)
+                        if (now - e.last < std::chrono::seconds(1) && k++ < 48)
+                            logf("vk: dummy: slot %#x resolved %lld times in 10 s: %s", slot, (long long)e.n, e.desc);
+                    logf("vk: dummy: %d slots resolved to the dummy in the last second", k);
+                    for (auto& [slot, e] : seen) e.n = 0;
+                }
+            }
+        }
         static std::unordered_map<uint32_t, int> told;
         if (told.size() < 64 && !told[handle & 0xFFFFF]++) {
             if (!known)
@@ -2153,7 +2231,8 @@ VkImageView texture_view_of(uint32_t handle, VkImageViewType want, ViewUse use, 
                      has_view && v.set_format ? v.format : 0, has_view && v.set_target ? v.target : -1, (int)want, (int)use);
         }
     }
-    handle_hits()[key] = {view, tex, level, version, dgen, use == ViewUse::Sample || use == ViewUse::Storage, texture_epoch()};
+    handle_hits()[key] = {view, tex, level, version, dgen, use == ViewUse::Sample || use == ViewUse::Storage, texture_epoch(), known};
+    view_slot_known = known;
     if (tex_out) *tex_out = tex;
     if (level_out) *level_out = level;
     return view;
@@ -2328,6 +2407,7 @@ bool dump_sampled_wanted(uint64_t key) {
 }   // (RX_VK_DUMP: the storage images the descriptors let the program write)
 TLS_OBJECT(dump_inputs, std::string)               // (and what it samples)
 int64_t st_dummy_textures;               // (textures sampled as the dummy: no image for the handle)
+int64_t st_dummy_known;                  // (Triforce: of those, registered textures: their image not made or not uploaded yet)
 
 void dump_input(char kind, uint32_t index, uint32_t handle, const Texture* tex) {
     char b[160];
@@ -2877,7 +2957,7 @@ void build_descriptors(const NvnState& s, const Program& p) {
                                tex ? tex->width : 0, tex ? tex->height : 0, tex ? tex->layers : 0, tex ? (void*)tex->image : nullptr,
                                (void*)view, view ? "" : " (dummy)");
                 if (view && tex && tex->gpu_written) draw_sampled().push_back(tex);
-                if (!view) view = dummies.view[(int)vt], st_dummy_textures += handle != 0;
+                if (!view) view = dummies.view[(int)vt], st_dummy_textures += handle != 0, st_dummy_known += handle != 0 && view_slot_known;
                 dw().imgs.push_back({sampler_for((int)(handle >> 20), d.is_depth), view, VK_IMAGE_LAYOUT_GENERAL});
             }
             w.pImageInfo = &dw().imgs[first];
@@ -2942,6 +3022,10 @@ TLS_OBJECT(pushed, std::array<Pushed, 2>)   // [graphics, compute]
 /// to it)
 VkPipelineCache shared_pipeline_cache() { return pcache; }
 void draw_skip_report(double frames) { skip_report_impl(frames), fine_report(frames); }
+/// (Triforce) how many texture bindings have sampled the dummy so far (a texture with no image yet: left for a later frame, not
+/// made, evicted): RX_VK_FRAME_TRACE's last column, the measure of materials showing flat while their textures come in
+/// Registered textures only: OoT binds one handle of no registered slot (0x3126f) in ~18 places a frame, always the dummy
+int64_t draw_dummy_textures() { return st_dummy_known; }
 void descriptors_disturbed() {
     pushed()[0].cmd = pushed()[1].cmd = VK_NULL_HANDLE;
 }
@@ -7102,6 +7186,15 @@ bool prepare_run(void (*progress)(size_t done, size_t total), bool background) {
         logf("vk: the shader list was hashed (%.0f MB in %.0f ms): written since the last check, or too close to it to go by its time",
              prepared_for.seed_size / 1048576.0, hash_ms);
     if (why == PrepareWhy::None && !getenv("RX_VK_PREPARE_AGAIN")) {
+        // (perf push 11-11: a shipped state list the notes were not made from, in a folder prepared already: its pipelines are
+        // noted now, for the precompile that follows, as a prepare would have. See state_shipped_id)
+        if (!background && state_shipped_new()) {
+            logf("vk: the shipped pipeline list is not the one this folder's notes were made from: its pipelines are noted now");
+            if (seed_open()) {
+                state_list_prepare(nullptr);
+                seed_close();
+            }
+        }
         if (getenv("RX_VK_SEED_CHECK")) seed_open();
         if (prepared_for.warmed == warmed || background) return false;
         // (translated, and the driver's part is another driver's, or of before the libraries were wanted: that part alone, no
@@ -7279,6 +7372,47 @@ void prepare_background() {
     }).detach();
 }
 
+// ---- (perf push 11-11) The precompile on a PC with little RAM. Every pipeline built here is kept for the session, with its
+// program: measured at a fresh Market (RTX 4070 SUPER), the process holds 12.9 GB in RAM without the precompile, 13.4 GB with
+// 4704 graphics and 275 compute pipelines, 15.7 GB with 8550 and 1650; after a tour of ten areas 18.6 against 20.6 GB. What
+// the precompile is for is the compile, which the caches keep (ours, mkw_vk_pipelines.bin, and the driver's): with them warm,
+// the same runs without it built 1462 and 4046 pipelines in play in 357 and 1639 ms in all (0.2-0.4 ms each), with as many
+// frames over 40, 100 and 250 ms as with it. So where RAM is short (under 20 GB in the PC: the 16 GB ones, whose logs show the
+// system taking pages back all through play) a pipeline is built before the game once, on the first start that has its note,
+// and that start records it (triforce_pipelines.bin.built, for this translator and driver); later starts leave it to its first
+// draw, and neither it nor its program is in RAM until then.
+// The price, same tour: of ~4050 pipelines then built in play, ten or twelve submissions spend 10-65 ms on them (some in frames
+// that were slow anyway, an area's arrival; three or four make a 40 ms frame of their own), and one in two tours had a
+// pipeline the caches missed (508 ms). So it is not the default: RX_VK_PRECOMPILE_KEEP=auto: this rule where the PC has under
+// 20 GB of RAM; =0: on any PC; unset or 1: every start builds and keeps all, as before ----
+constexpr uint64_t kBuiltComputes = 0xC04D50555445D001ull;   // (in the record: the compute programs' pipelines were built)
+bool precompile_keeps_all() {
+    const char* e = getenv("RX_VK_PRECOMPILE_KEEP");
+    if (!e) return true;
+    if (strcmp(e, "auto")) return atoi(e) != 0;
+#ifdef _WIN32
+    MEMORYSTATUSEX ms{};
+    ms.dwLength = sizeof ms;
+    if (GlobalMemoryStatusEx(&ms)) return ms.ullTotalPhys >= (20ull << 30);
+#endif
+    return true;
+}
+std::unordered_set<uint64_t> built_read(uint64_t stamp) {
+    std::unordered_set<uint64_t> keys;
+    if (FILE* f = fopen((pipe_notes_path() + ".built").c_str(), "rb")) {
+        uint64_t v = 0;
+        if (fread(&v, 8, 1, f) == 1 && v == stamp)
+            while (fread(&v, 8, 1, f) == 1) keys.insert(v);
+        fclose(f);
+    }
+    return keys;
+}
+void built_write(uint64_t stamp, const std::unordered_set<uint64_t>& keys) {
+    std::vector<uint64_t> all{stamp};
+    all.insert(all.end(), keys.begin(), keys.end());
+    if (FILE* f = fopen((pipe_notes_path() + ".built").c_str(), "wb")) fwrite(all.data(), 8, all.size(), f), fclose(f);
+}
+
 void precompile_run(void (*progress)(size_t done, size_t total)) {
     const auto t0 = std::chrono::steady_clock::now();
     // (a start that dies in here would die in here every time, the notes being what it builds from: a player saw the console reach
@@ -7312,12 +7446,29 @@ void precompile_run(void (*progress)(size_t done, size_t total)) {
         std::lock_guard lk(state_mu);
         if (!state_file) state_open_locked();
     }
+    // (little RAM, see precompile_keeps_all: the pipelines an earlier start built for these caches are left to their first draw)
+    const bool light = !precompile_keeps_all();
+    const uint64_t built_stamp = warmed_stamp(gpl_wanted());
+    std::unordered_set<uint64_t> built;
+    const size_t noted_n = notes.size();
+    bool computes_built = false;
+    if (light) {
+        built = built_read(built_stamp);
+        computes_built = built.count(kBuiltComputes) != 0;
+        std::erase_if(notes, [&](const std::unique_ptr<PipeNote>& n) { return built.count(n->key) != 0; });
+        logf("vk: precompile: RAM spared (RX_VK_PRECOMPILE_KEEP=1: as before): %zu of %zu noted pipelines were built by "
+             "an earlier start and are left to their first draw%s", noted_n - notes.size(), noted_n,
+             computes_built ? ", the compute programs' too" : "");
+    }
+    std::vector<uint64_t> building;   // (their keys, for the record once they are built)
+    if (light)
+        for (const auto& n : notes) building.push_back(n->key);
     std::unordered_set<uint64_t> wanted;
     for (const auto& n : notes) wanted.insert(n->prog);
     // (the compute programs: those play dispatched (triforce_computes.bin), or every kept one when there is no list yet)
     const char* which = getenv("RX_VK_PRECOMPILE_COMPUTES");
-    const std::unordered_set<uint64_t> used = computes_read();
-    const bool all_computes = which ? !strcmp(which, "all") : used.empty();
+    const std::unordered_set<uint64_t> used = computes_built ? std::unordered_set<uint64_t>{} : computes_read();
+    const bool all_computes = !computes_built && (which ? !strcmp(which, "all") : used.empty());
     if (!all_computes && !(which && !strcmp(which, "none"))) wanted.insert(used.begin(), used.end());
     std::vector<Program*> computes, fallbacks;
     const size_t programs_n = program_cache_load_some(wanted, [&](Program& p) {
@@ -7431,6 +7582,13 @@ void precompile_run(void (*progress)(size_t done, size_t total)) {
     } else {
         for (std::thread& t : threads) t.join();
         delete pre;
+        // (little RAM: what this start built is on disk before the record says so, and the next start leaves it out)
+        if (light && !prepare_stopped() && (!building.empty() || !computes_built)) {
+            built.insert(building.begin(), building.end());
+            built.insert(kBuiltComputes);
+            pipeline_cache_save(true);
+            built_write(built_stamp, built);
+        }
     }
     logf("vk: precompile: %zu programs, %zu graphics and %zu compute pipelines, %zu mesh fallback programs in %.0f ms (%.0f ms "
          "of it the caches opened, the notes and programs read)", programs_n, graphics_n, computes_n, fallbacks_n,
