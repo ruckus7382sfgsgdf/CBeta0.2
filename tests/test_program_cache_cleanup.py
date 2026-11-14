@@ -41,7 +41,10 @@ class CacheModuleCleanupTests(unittest.TestCase):
         header = (ROOT / 'gpu/vk/vk_shader.h').read_text(encoding='utf-8')
         structs = '\n'.join(block(header, marker) + ';' for marker in ('struct Stage {', 'struct Program {'))
         structs += '\n' + block(source, 'struct DiskRecord {') + ';'
-        functions = '\n'.join(block(source, marker) for marker in (
+        # (local, RenoDX port: make_module names each module by its CRC-32 and asks vk_renodx.h for a replacement, which the
+        # test's stub never has. An older --source has no spirv_crc32)
+        crc = ('uint32_t spirv_crc32(',) if 'uint32_t spirv_crc32(' in source else ()
+        functions = '\n'.join(block(source, marker) for marker in crc + (
             'VkShaderModule make_module(', 'uint64_t answers_hash(', 'bool answers_fit(', 'void idx_put('))
         serialization = source[source.index('void put_bytes('):source.index('void program_cache_save(')]
         functions += '\n' + serialization + block(source, 'void program_cache_save(')

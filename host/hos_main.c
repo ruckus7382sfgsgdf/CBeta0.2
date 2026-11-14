@@ -440,39 +440,6 @@ int hos_oot_is_player(Ctx *c, uint64_t actor) {
 }
 
 #if defined(_WIN32) || defined(__linux__)   /* (the debug tools: host/posix has what they call) */
-/* OneShotAddOrRemovePouchContent (f_828d4a70) for one pouch content by actor name: delta > 0 adds, < 0 removes.
-   Returns the event status (top bits of the result word), or -1 when the pouch is not ready. */
-static int oot_pouch_change(Ctx *c, const char *name, int delta) {
-    const uint64_t pouch_singleton = recomp_load64(c, 0x84c9e0d0ULL);
-    const uint64_t state_singleton = recomp_load64(c, 0x84c9e2a8ULL);
-    const uint64_t actor_db = recomp_load64(c, 0x84eb6888ULL);
-    const uint64_t actor_info = recomp_load64(c, 0x84e8c060ULL);
-    A64Fn edit = a64_lookup(0x828d4a70ULL);
-    if (!edit || !pouch_singleton || !recomp_load64(c, pouch_singleton) ||
-        !state_singleton || !recomp_load64(c, state_singleton) || !actor_db || !actor_info || !delta ||
-        strlen(name) >= 0x60) return -1;
-
-    // OneShotAddOrRemovePouchContent reads the event parameters through pointers.
-    const Ctx saved = *c;
-    const uint64_t event = (c->x[31] - 0xe0) & ~0xfULL;
-    memset(A64_PTR(event), 0, 0xe0);
-    memcpy(A64_PTR(event + 0x80), name, strlen(name) + 1);
-    recomp_store64_sp(c, event + 0x20, event + 0x60);
-    recomp_store64_sp(c, event + 0x30, event + 0x70);
-    recomp_store64_sp(c, event + 0x38, event + 0x68);
-    recomp_store64_sp(c, event + 0x48, event + 0x74);
-    recomp_store64_sp(c, event + 0x50, event + 0x74);
-    recomp_store64_sp(c, event + 0x60, event + 0x80);
-    recomp_store64_sp(c, event + 0x68, 0x83f0a6d8ULL); // Script
-    recomp_store32_sp(c, event + 0x70, (uint32_t)delta);
-    c->x[31] = event;
-    c->x[0] = event;
-    edit(c);
-    const int result = (int)(recomp_load32(c, event + 0x18) >> 30);
-    *c = saved;
-    return result;
-}
-
 /* QueryGetPouchContentNumByActorName (f_82a3c260): f_805b63e0(pouch manager, &name, 0, 0) counts one content. */
 static int oot_pouch_count(Ctx *c, const char *name) {
     const uint64_t manager = recomp_load64(c, 0x84e98e28ULL);
@@ -490,6 +457,9 @@ static int oot_pouch_count(Ctx *c, const char *name) {
     return n;
 }
 
+static int oot_item_get(Ctx *c, const char *name);
+static int oot_item_give(Ctx *c, const char *name, int count);
+
 static void oot_edit_pouch(Ctx *c, int action) {
     static const char *const items[] = {
         "Item_DekuSeed", "Item_DekuNut", "Item_DekuStick", "Item_Bomb", "Item_Arrow_Normal"
@@ -497,8 +467,11 @@ static void oot_edit_pouch(Ctx *c, int action) {
     const unsigned item = (unsigned)(action - 200) / 32;
     const int delta = (action - 200) % 32 - 10;
     if (item >= sizeof items / sizeof items[0] || !delta || delta < -10 || delta > 10) return;
-    const int result = oot_pouch_change(c, items[item], delta);
-    if (result >= 0) hos_log("cheats: pouch %s %+d (event status %d)", items[item], delta, result);
+    const int have = oot_item_get(c, items[item]);
+    if (have < 0) return;
+    const int want = have + delta < 0 ? 0 : have + delta > 999 ? 999 : have + delta;
+    oot_item_give(c, items[item], want);
+    hos_log("cheats: inventory %s: %d -> %d", items[item], have, want);
 }
 
 /* The Inventory page (gpu/vk/oot_cheat_items.h): counts go to the menu twice a second, edits come back as actions. */
@@ -509,88 +482,39 @@ static const char *const oot_item_names[] = {OOT_CHEAT_ITEMS(OOT_NO_SECTION, OOT
 static const unsigned char oot_item_kinds[] = {OOT_CHEAT_ITEMS(OOT_NO_SECTION, OOT_ITEM_KIND)};
 #define OOT_ITEM_COUNT (sizeof oot_item_names / sizeof oot_item_names[0])
 
-static int oot_item_count(Ctx *c, const char *name);
 static int oot_gamedata_bool(Ctx *c, uint32_t hash, int *value);
 
 static void oot_inventory_refresh(Ctx *c, int64_t now) {
     void rx_option_set(int id, int value);
     static int64_t next;
-    static int probed;
     if (now < next) return;
     next = now + 500000000LL;
-    int loaded = 0;   /* (a save's counts read: the first item's is not -1) */
-    for (unsigned i = 0; i < OOT_ITEM_COUNT; i++) {
-        const int count = oot_item_count(c, oot_item_names[i]);
-        if (!i) loaded = count >= 0;
-        rx_option_set(OOT_CHEAT_ITEM_BASE + (int)i, count);
-    }
+    /* (a save is loaded once the pouch answers: before that GameData holds a new game's values, shown as unknown) */
+    const int loaded = oot_pouch_count(c, oot_item_names[0]) >= 0;
+    for (unsigned i = 0; i < OOT_ITEM_COUNT; i++)
+        rx_option_set(OOT_CHEAT_ITEM_BASE + (int)i, loaded ? oot_item_get(c, oot_item_names[i]) : -1);
     {   /* Link's age for the Debug tab's Switch age row: 0 child, 1 adult, -1 no save loaded (Sequence_IsChildhood) */
         int child = 1;
         rx_option_set(OOT_CHEAT_AGE_ID, loaded && oot_gamedata_bool(c, 0xcea220d3u, &child) ? (child ? 0 : 1) : -1);
     }
-    if (!probed && oot_pouch_count(c, "Item_DekuSeed") >= 0) {
-        probed = 1;   /* (one line naming every count, both spellings: which names the pouch knows) */
-        static const char *const probes[] = {OOT_CHEAT_ITEM_PROBES};
-        const unsigned total = (unsigned)(OOT_ITEM_COUNT + sizeof probes / sizeof probes[0]);
-        char line[512];
-        size_t used = 0;
-        for (unsigned i = 0; i < total; i++) {   /* (several short lines: the log cuts long ones) */
-            const char *name = i < OOT_ITEM_COUNT ? oot_item_names[i] : probes[i - OOT_ITEM_COUNT];
-            used += (size_t)snprintf(line + used, sizeof line - used, " %s=%d", name, oot_pouch_count(c, name));
-            if (used > 300 || i + 1 == total) hos_log("cheats: inventory probe:%s", line), used = 0;
-        }
-    }
-}
-
-/* Masks share one slot (the Happy Mask Shop lends one at a time). The game takes "Item_Mask_X" when adding one and
-   may keep it as "Armor_Child_Mask_X", so both spellings count and a new mask first returns the one held. */
-static int oot_mask_alias(const char *name, char *alias, size_t size) {
-    if (!strncmp(name, "Armor_Child_Mask_", 17)) return snprintf(alias, size, "Item_Mask_%s", name + 17), 1;
-    return 0;
-}
-
-static int oot_item_count(Ctx *c, const char *name) {
-    char alias[64];
-    const int n = oot_pouch_count(c, name);
-    if (!oot_mask_alias(name, alias, sizeof alias)) return n;
-    const int m = oot_pouch_count(c, alias);
-    return n > m ? n : m;
 }
 
 static void oot_inventory_edit(Ctx *c, int action) {
     const unsigned item = (unsigned)(action - OOT_CHEAT_ITEM_ACTION) / 256, op = (unsigned)(action - OOT_CHEAT_ITEM_ACTION) % 256;
     if (item >= OOT_ITEM_COUNT) return;
     const char *name = oot_item_names[item];
-    char alias[64];
-    const int is_mask = oot_mask_alias(name, alias, sizeof alias);
-    const int have = oot_item_count(c, name);
-    int delta = 0;
-    if (op == 200) delta = have > 0 ? -have : 1;   /* unlock / relock */
-    else if (op < 128) delta = (int)op - 64;
-    if (!delta || have < 0) return;
-    if (is_mask && delta > 0) {   /* return whichever mask is in the slot first */
-        for (unsigned i = 0; i < OOT_ITEM_COUNT; i++) {
-            char other_alias[64];
-            if (i == item || !oot_mask_alias(oot_item_names[i], other_alias, sizeof other_alias)) continue;
-            const char *spellings[2] = {oot_item_names[i], other_alias};
-            for (unsigned k = 0; k < 2; k++) {
-                const int held = oot_pouch_count(c, spellings[k]);
-                if (held > 0) hos_log("cheats: inventory returned %s (status %d)", spellings[k], oot_pouch_change(c, spellings[k], -held));
-            }
-        }
-        delta = 1;
+    const int have = oot_item_get(c, name);
+    if (have < 0) {
+        hos_log("cheats: inventory %s: the game's save data has no such item", name);
+        return;
     }
-    int result = -1;
-    if (is_mask && delta < 0) {   /* remove under whichever spelling holds it */
-        const char *spellings[2] = {name, alias};
-        for (unsigned k = 0; k < 2; k++) {
-            const int held = oot_pouch_count(c, spellings[k]);
-            if (held > 0) result = oot_pouch_change(c, spellings[k], -held);
-        }
-    } else {
-        result = oot_pouch_change(c, is_mask ? alias : name, delta);   /* (masks are added as Item_Mask_X, as the shop does) */
-    }
-    hos_log("cheats: inventory %s %+d (had %d, now %d, event status %d)", name, delta, have, oot_item_count(c, name), result);
+    int want = have;
+    if (op == 200) want = have > 0 ? 0 : 1;   /* unlock / relock */
+    else if (op < 128) want = have + (int)op - 64;
+    want = want < 0 ? 0 : want > 999 ? 999 : want;
+    if (want == have) return;
+    oot_item_give(c, name, want);
+    hos_log("cheats: inventory %s: %d -> %d", name, have, want);
 }
 
 static void oot_set_time(Ctx *c, unsigned hour) {
@@ -758,8 +682,50 @@ static struct {
     unsigned destination;
 } teleport;
 
+/* (Triforce, lab) The pipeline crawl's commands, from the live input file (host/nn_hid.c). "!banc <map> <entry> <event>
+   [child|adult]" asks for a map change to any map by its names, as the game's own entrance actors do (the names are in the
+   maps' files: Banc/GameBancParam, the StartPos actors, the entrance actors' NextEventName); "!pos <x> <y> <z>" puts Link
+   there with his controller's ChangePosition, and holds him there after "!hold 1" (no falling between two places);
+   "!where" says the map, whether it loads, whether an event plays and where Link is. D:\src\lab\hookshot\crawl drives
+   them to draw every map's actors once, for the pipeline list; nothing sends them in play. */
+static struct {
+    SRWLOCK lock;
+    char banc[96], start[96], boot[128], go[96];   /* (go: the leaving event, "" the usual Dm_SY_BancChangeGo) */
+    int banc_pending, age;   /* (age: -1 as it is, 0 adult, 1 child) */
+    float pos[3];
+    int pos_pending, hold, where;
+    int64_t retry_at;
+    char give[96];   /* ("!give <pouch content name> <delta>": the Inventory page's edit by name, for the lab) */
+    int give_delta, give_pending;
+} crawl = {SRWLOCK_INIT};
+static const char *crawl_banc, *crawl_start, *crawl_boot, *crawl_go;   /* (set while oot_teleport serves a "!banc") */
+void hos_oot_live_crawl(const char *line) {
+    AcquireSRWLockExclusive(&crawl.lock);
+    char age[16] = "";
+    float x, y, z;
+    int on;
+    if (!strncmp(line, "!banc ", 6)) {
+        crawl.go[0] = 0;   /* ("!banc <map> <entry> <event> [child|adult|keep [<leaving event>]]") */
+        if (sscanf(line + 6, "%95s %95s %127s %15s %95s", crawl.banc, crawl.start, crawl.boot, age, crawl.go) >= 3) {
+            crawl.age = !strcmp(age, "child") ? 1 : !strcmp(age, "adult") ? 0 : -1;
+            crawl.banc_pending = 1, crawl.retry_at = 0;
+        }
+    } else if (!strncmp(line, "!pos ", 5)) {
+        if (sscanf(line + 5, "%f %f %f", &x, &y, &z) == 3) crawl.pos[0] = x, crawl.pos[1] = y, crawl.pos[2] = z, crawl.pos_pending = 1;
+    } else if (!strncmp(line, "!hold ", 6)) {
+        if (sscanf(line + 6, "%d", &on) == 1) crawl.hold = on != 0;
+    } else if (!strncmp(line, "!where", 6)) {
+        crawl.where = 1;
+    } else if (!strncmp(line, "!give ", 6)) {
+        if (sscanf(line + 6, "%95s %d", crawl.give, &crawl.give_delta) == 2) crawl.give_pending = 1;
+    } else if (!strncmp(line, "!items", 6)) {
+        crawl.give_pending = 2;
+    }
+    ReleaseSRWLockExclusive(&crawl.lock);
+}
+
 static int oot_teleport(Ctx *c, uint64_t actor, unsigned index) {
-    if (index >= sizeof oot_destinations / sizeof oot_destinations[0]) return 0;
+    if (!crawl_banc && index >= sizeof oot_destinations / sizeof oot_destinations[0]) return 0;
     const int64_t now = hos_now_ns();
     if (teleport.requested_at && now - teleport.requested_at < 8000000000LL) {
         hos_log("cheats: teleport ignored, a request is still in progress");
@@ -782,10 +748,11 @@ static int oot_teleport(Ctx *c, uint64_t actor, unsigned index) {
         return 0;
     }
     if (!oot_gamedata_bool(c, 0xcea220d3u, &child)) hos_log("cheats: Sequence_IsChildhood not found, using child maps");
-    const OotDestination *d = &oot_destinations[index];
+    const OotDestination *d = &oot_destinations[crawl_banc ? 0 : index];
     const char *banc = child ? d->child_banc : d->adult_banc;
     const char *start = child ? d->child_start : d->adult_start;
     const char *boot = child ? d->child_boot : d->adult_boot;
+    if (crawl_banc) banc = crawl_banc, start = crawl_start, boot = crawl_boot;   /* (the crawl's "!banc": any map) */
     if (!banc) {
         hos_log("cheats: teleport %u has no %s map", index, child ? "child" : "adult");
         return 0;
@@ -802,6 +769,7 @@ static int oot_teleport(Ctx *c, uint64_t actor, unsigned index) {
 
     const char *event_env = getenv("HOS_OOT_TELEPORT_EVENT");
     const char *event = event_env && *event_env ? event_env : "Dm_SY_BancChangeGo";
+    if (crawl_banc && crawl_go && *crawl_go) event = crawl_go;   /* (the crawl: the leaving event some maps' own exits use) */
     const char *starter_env = getenv("HOS_OOT_TELEPORT_STARTER");
     const int with_starter = !(starter_env && !strcmp(starter_env, "0"));
 
@@ -842,12 +810,14 @@ static int oot_teleport(Ctx *c, uint64_t actor, unsigned index) {
         release_link(c);
     }
     *c = saved;
-    teleport.requested_at = now;
-    teleport.check_at = now + 1500000000LL;
+    const int refused = crawl_banc && (!ok || !result);   /* (the crawl: asked again soon, not after the 8 s of a request under way) */
+    teleport.requested_at = refused ? 0 : now;
+    teleport.check_at = refused ? 0 : now + 1500000000LL;
     teleport.destination = index;
     hos_log("cheats: teleport %s to %s at %s (boot %s, event %s, starter %d): request %s, result %#llx",
             child ? "child" : "adult", banc, start, boot, event, with_starter, ok ? "sent" : "not built",
             (unsigned long long)result);
+    if (crawl_banc) return ok && result != 0;   /* (the crawl asks again until the event manager takes the request) */
     return ok;   /* (sent; the request's own result is only logged) */
 }
 
@@ -868,6 +838,180 @@ static int oot_gamedata_set_bool(Ctx *c, uint32_t hash, int value) {
         recomp_store8(c, recomp_load64(c, mgr + 24) + index * 24ULL + 22, value ? 1 : 0);
         return 1;
     }
+    return 0;
+}
+
+/* ---- (Triforce, 11-13) The inventory in GameData ----
+   The items are GameData: struct "Pouch" (0x3da094e3) has a struct for each item, whose member "Stock" (0x22344481) is an
+   Int, the item's count; struct 0xade0ef78 has a Bool for each item, "got it once". The names' hashes are MurmurHash3
+   (seed 0), as the game's getters take them. Layout and setters as tangerineturtle1/NX2navi's co-op reads and writes
+   them (runtime/coop_game.c, MIT): the Int container at GameDataMgr+0xc8 (count +8, entries +0x10, the (hash, index)
+   table +0x18, its size +0x24; 40-byte entries, the current value at +0x1c), the structs' table at +0xc10 (count,
+   +8 entries of 32 bytes, +0x10 table, +0x1c size; an entry's members: +8 a table of (member hash, value hash) pairs,
+   +0x14 its size). Writes go through the game's own SetInt (0x80183b70) and SetBool (0x806a2b20; NX2navi names them from main, which is at 0x80020000 here): x0 the manager, x1 the
+   value, x2 the hash. They queue the change, and the game's per-frame drain writes the current and the saved value and
+   does its own bookkeeping, as for a change the game made. The event the Inventory page called before
+   (OneShotAddOrRemovePouchContent) answered "done" and added nothing, outside an event of the game's own. */
+static uint32_t oot_murmur3(const char *text) {
+    const size_t n = strlen(text);
+    uint32_t h = 0;
+    size_t i = 0;
+    for (; i + 4 <= n; i += 4) {
+        uint32_t k;
+        memcpy(&k, text + i, 4);
+        k *= 0xcc9e2d51u, k = k << 15 | k >> 17, k *= 0x1b873593u;
+        h ^= k, h = h << 13 | h >> 19, h = h * 5 + 0xe6546b64u;
+    }
+    uint32_t k = 0;
+    switch (n & 3) {
+    case 3: k ^= (uint32_t)(uint8_t)text[i + 2] << 16;   /* fall through */
+    case 2: k ^= (uint32_t)(uint8_t)text[i + 1] << 8;    /* fall through */
+    case 1: k ^= (uint8_t)text[i], k *= 0xcc9e2d51u, k = k << 15 | k >> 17, k *= 0x1b873593u, h ^= k;
+    }
+    h ^= (uint32_t)n;
+    h ^= h >> 16, h *= 0x85ebca6bu, h ^= h >> 13, h *= 0xc2b2ae35u, h ^= h >> 16;
+    return h;
+}
+
+/* the index a (hash, index) table of size cells gives for hash, -1 none (open addressing from hash % size) */
+static int64_t oot_gd_lookup(Ctx *c, uint64_t table, uint32_t size, uint32_t hash) {
+    if (!table || !size || size > (1u << 22) || !hash) return -1;
+    for (uint32_t probe = 0, slot = hash % size; probe < size; probe++, slot = slot + 1 == size ? 0 : slot + 1) {
+        const uint32_t key = recomp_load32(c, table + slot * 8ULL);
+        if (!key) return -1;
+        if (key == hash) return recomp_load32(c, table + slot * 8ULL + 4);
+    }
+    return -1;
+}
+
+/* a struct's entry by its hash, 0 none */
+static uint64_t oot_gd_struct(Ctx *c, uint64_t mgr, uint32_t hash) {
+    const int64_t i = oot_gd_lookup(c, recomp_load64(c, mgr + 0xc20), recomp_load32(c, mgr + 0xc2c), hash);
+    const uint64_t entries = recomp_load64(c, mgr + 0xc18);
+    return i < 0 || !entries || (uint64_t)i >= recomp_load32(c, mgr + 0xc10) ? 0 : entries + (uint64_t)i * 0x20;
+}
+
+/* the value hash of a struct's member, 0 none (the members' table is searched whole: a few dozen pairs) */
+static uint32_t oot_gd_member(Ctx *c, uint64_t entry, uint32_t member) {
+    const uint64_t table = entry ? recomp_load64(c, entry + 8) : 0;
+    const uint32_t size = entry ? recomp_load32(c, entry + 0x14) : 0;
+    if (!table || !size || size > 65536) return 0;
+    for (uint32_t i = 0; i < size; i++)
+        if (recomp_load32(c, table + 8ULL * i) == member) return recomp_load32(c, table + 8ULL * i + 4);
+    return 0;
+}
+
+/* an Int's entry by its hash, 0 none */
+static uint64_t oot_gd_int(Ctx *c, uint64_t mgr, uint32_t hash) {
+    const int64_t i = oot_gd_lookup(c, recomp_load64(c, mgr + 0xc8 + 0x18), recomp_load32(c, mgr + 0xc8 + 0x24), hash);
+    const uint64_t entries = recomp_load64(c, mgr + 0xc8 + 0x10);
+    return i < 0 || !entries || (uint64_t)i >= recomp_load32(c, mgr + 0xc8 + 8) ? 0 : entries + (uint64_t)i * 0x28;
+}
+
+/* the hash of an item's count (its Pouch struct's Stock), 0 when the Pouch has no such item */
+static uint32_t oot_item_stock_hash(Ctx *c, uint64_t mgr, const char *name) {
+    const uint32_t item = oot_gd_member(c, oot_gd_struct(c, mgr, 0x3da094e3u), oot_murmur3(name));
+    return item ? oot_gd_member(c, oot_gd_struct(c, mgr, item), 0x22344481u) : 0;
+}
+
+/* the game's own SetInt / SetBool: 1 when called */
+static int oot_gd_set(Ctx *c, uint64_t mgr, uint32_t hash, uint32_t value, int is_bool) {
+    A64Fn set = a64_lookup(is_bool ? 0x806a2b20ULL : 0x80183b70ULL);
+    if (!set || !mgr || !hash) return 0;
+    const Ctx saved = *c;
+    c->x[31] = (c->x[31] - 0x100) & ~0xfULL;
+    c->x[0] = mgr, c->x[1] = value, c->x[2] = hash;
+    set(c);
+    *c = saved;
+    return 1;
+}
+
+/* a Bool's entry by its hash, 0 none (24-byte entries, the current value at +22, as oot_gamedata_set_bool has them) */
+static uint64_t oot_gd_bool(Ctx *c, uint64_t mgr, uint32_t hash) {
+    const int64_t i = oot_gd_lookup(c, recomp_load64(c, mgr + 32), recomp_load32(c, mgr + 44), hash);
+    const uint64_t entries = recomp_load64(c, mgr + 24);
+    return i < 0 || !entries || (uint64_t)i >= recomp_load32(c, mgr + 16) ? 0 : entries + (uint64_t)i * 24;
+}
+
+/* An item's count as GameData has it: its Pouch struct's Stock, or 1 / 0 of its "got it once" flag where it has only
+   that (the songs). -1: the save data has no such item */
+static int oot_item_get(Ctx *c, const char *name) {
+    const uint64_t mgr = oot_singleton(c, OOT_GAMEDATA_SLOT);
+    if (!mgr) return -1;
+    const uint32_t stock = oot_item_stock_hash(c, mgr, name);
+    uint64_t entry = stock ? oot_gd_int(c, mgr, stock) : 0;
+    if (entry) return (int)recomp_load32(c, entry + 0x1c);
+    const uint32_t first = oot_gd_member(c, oot_gd_struct(c, mgr, 0xade0ef78u), oot_murmur3(name));
+    entry = first ? oot_gd_bool(c, mgr, first) : 0;
+    return entry ? recomp_load8(c, entry + 22) & 1 : -1;
+}
+
+/* What the bags hold, as the game's files have it (each bag's GameParameter/ExpansionMaxNumActor: "GameData" the name of
+   the size in the capacity struct 0xf80f8077, "MaxNum" the size). The game raises the size when it gives a bag; a bag or
+   ammunition set from here does the same, so that what is given can be carried and used. */
+static const struct { const char *bag, *what; int max; } oot_bags[] = {
+    {"Item_BombBag_Small", "Bomb", 20},      {"Item_BombBag_Medium", "Bomb", 30},      {"Item_BombBag_Large", "Bomb", 40},
+    {"Item_Quiver_Small", "Arrow", 30},      {"Item_Quiver_Medium", "Arrow", 40},      {"Item_Quiver_Large", "Arrow", 50},
+    {"Item_BulletBag_Small", "DekuSeed", 30}, {"Item_BulletBag_Medium", "DekuSeed", 40}, {"Item_BulletBag_Large", "DekuSeed", 50},
+    {"Item_NutBag_Small", "DekuNut", 20},    {"Item_NutBag_Medium", "DekuNut", 30},    {"Item_NutBag_Large", "DekuNut", 40},
+    {"Item_StickBag_Small", "DekuStick", 10}, {"Item_StickBag_Medium", "DekuStick", 20}, {"Item_StickBag_Large", "DekuStick", 30},
+    {"Item_Wallet_Medium", "Rupee", 500},    {"Item_Wallet_Large", "Rupee", 1000},
+};
+static const struct { const char *item, *what; } oot_ammo[] = {
+    {"Item_Bomb", "Bomb"}, {"Item_Bombchu", "Bomb"}, {"Item_Arrow_Normal", "Arrow"}, {"Item_DekuSeed", "DekuSeed"},
+    {"Item_DekuNut", "DekuNut"}, {"Item_DekuStick", "DekuStick"},
+};
+#define OOT_BAGS (sizeof oot_bags / sizeof oot_bags[0])
+
+/* a size of the capacity struct: its Int's hash (0 none), and its value now through *value */
+static uint32_t oot_capacity(Ctx *c, uint64_t mgr, const char *what, int *value) {
+    const uint32_t hash = oot_gd_member(c, oot_gd_struct(c, mgr, 0xf80f8077u), oot_murmur3(what));
+    const uint64_t entry = hash ? oot_gd_int(c, mgr, hash) : 0;
+    if (value) *value = entry ? (int)recomp_load32(c, entry + 0x1c) : 0;
+    return entry ? hash : 0;
+}
+
+/* a count of the Pouch set (and the item marked as got once), 1 when the Pouch has the item */
+static int oot_pouch_set(Ctx *c, uint64_t mgr, const char *name, int count) {
+    const uint32_t stock = oot_item_stock_hash(c, mgr, name);
+    if (!stock || !oot_gd_int(c, mgr, stock)) return 0;
+    oot_gd_set(c, mgr, stock, (uint32_t)(count < 0 ? 0 : count), 0);
+    const uint32_t first = oot_gd_member(c, oot_gd_struct(c, mgr, 0xade0ef78u), oot_murmur3(name));
+    if (count > 0 && first) oot_gd_set(c, mgr, first, 1, 1);   /* ("got it once": as the game marks what was got) */
+    return 1;
+}
+
+/* An item's count set, through the game's own setters: 1 done, 0 the save data has no such item */
+static int oot_item_give(Ctx *c, const char *name, int count) {
+    const uint64_t mgr = oot_singleton(c, OOT_GAMEDATA_SLOT);
+    if (!mgr) return 0;
+    for (unsigned i = 0; i < OOT_BAGS; i++) {   /* a bag: the size it gives, or without it the largest bag left */
+        if (strcmp(name, oot_bags[i].bag)) continue;
+        int size = 0, best = count > 0 ? oot_bags[i].max : !strcmp(oot_bags[i].what, "Rupee") ? 200 : 0;
+        const uint32_t hash = oot_capacity(c, mgr, oot_bags[i].what, &size);
+        for (unsigned k = 0; k < OOT_BAGS; k++)
+            if (k != i && !strcmp(oot_bags[k].what, oot_bags[i].what) && oot_bags[k].max > best && oot_item_get(c, oot_bags[k].bag) > 0)
+                best = oot_bags[k].max;
+        if (hash && best != size) oot_gd_set(c, mgr, hash, (uint32_t)best, 0);
+    }
+    for (unsigned i = 0; count > 0 && i < sizeof oot_ammo / sizeof oot_ammo[0]; i++) {   /* ammunition: a bag that holds it */
+        if (strcmp(name, oot_ammo[i].item)) continue;
+        int size = 0, fits = -1, largest = -1;
+        const uint32_t hash = oot_capacity(c, mgr, oot_ammo[i].what, &size);
+        for (unsigned k = 0; k < OOT_BAGS; k++) {
+            if (strcmp(oot_bags[k].what, oot_ammo[i].what)) continue;
+            if (largest < 0 || oot_bags[k].max > oot_bags[largest].max) largest = (int)k;
+            if (oot_bags[k].max >= count && (fits < 0 || oot_bags[k].max < oot_bags[fits].max)) fits = (int)k;
+        }
+        if (largest >= 0 && count > oot_bags[largest].max) count = oot_bags[largest].max, fits = largest;
+        if (hash && fits >= 0 && count > size) {
+            oot_pouch_set(c, mgr, oot_bags[fits].bag, 1);
+            oot_gd_set(c, mgr, hash, (uint32_t)oot_bags[fits].max, 0);
+        }
+    }
+    if (oot_pouch_set(c, mgr, name, count)) return 1;
+    const uint32_t first = oot_gd_member(c, oot_gd_struct(c, mgr, 0xade0ef78u), oot_murmur3(name));
+    if (first && oot_gd_bool(c, mgr, first)) return oot_gd_set(c, mgr, first, count > 0, 1);   /* (a song: its flag) */
     return 0;
 }
 
@@ -959,7 +1103,94 @@ static void oot_update_player_cheats(Ctx *c, uint64_t actor, uint64_t components
     } else if (action >= 100 && action < 124) {
         oot_set_time(c, action - 100);
     }
-    if (!flying && action != 2 && action != 3) return;
+    /* (Triforce, lab) the crawl's commands: see crawl above */
+    static float crawl_target[3];
+    static int crawl_holding;
+    static uint64_t crawl_actor;
+    int crawl_goto = 0;
+    {
+        char b[96], s[96], e[128], g[96];
+        int try_banc = 0, age = -1, where = 0, hold;
+        AcquireSRWLockExclusive(&crawl.lock);
+        if (crawl.banc_pending && now >= crawl.retry_at) {
+            memcpy(b, crawl.banc, sizeof b), memcpy(s, crawl.start, sizeof s), memcpy(e, crawl.boot, sizeof e);
+            memcpy(g, crawl.go, sizeof g);
+            age = crawl.age, try_banc = 1;
+        }
+        if (crawl.pos_pending) crawl.pos_pending = 0, memcpy(crawl_target, crawl.pos, sizeof crawl_target), crawl_goto = 1;
+        where = crawl.where, crawl.where = 0;
+        hold = crawl.hold;
+        char give[96] = "";
+        int give_delta = 0;
+const int give_pending = crawl.give_pending;
+        if (give_pending) crawl.give_pending = 0, memcpy(give, crawl.give, sizeof give), give_delta = crawl.give_delta;
+        ReleaseSRWLockExclusive(&crawl.lock);
+        if (give_pending == 1 && give[0]) {
+            const int had = oot_item_get(c, give);
+            const int done = had >= 0 && oot_item_give(c, give, had + give_delta);
+            hos_log("cheats: crawl: give %s %+d: GameData had %d (-1: no such item), the pouch %d: %s", give, give_delta, had,
+                    oot_pouch_count(c, give), done ? "set" : "not set");
+        }
+        if (give_pending == 2) {   /* ("!items": every item of the Inventory page as the pouch and GameData have it) */
+            const uint64_t mgr = oot_singleton(c, OOT_GAMEDATA_SLOT);
+            const uint64_t pouch = mgr ? oot_gd_struct(c, mgr, 0x3da094e3u) : 0;
+            hos_log("cheats: crawl: items: manager %#llx (the other holder: %#llx), Pouch struct %#llx with %u member cells, %u Ints",
+                    (unsigned long long)mgr, (unsigned long long)recomp_load64(c, 0x84ea42a8ULL), (unsigned long long)pouch,
+                    pouch ? recomp_load32(c, pouch + 0x14) : 0, mgr ? recomp_load32(c, mgr + 0xc8 + 8) : 0);
+            char line[400], num[16];
+            size_t used = 0;
+            for (unsigned i = 0; mgr && i < OOT_ITEM_COUNT; i++) {
+                snprintf(num, sizeof num, "%d", oot_item_get(c, oot_item_names[i]));
+                used += (size_t)snprintf(line + used, sizeof line - used, " %s=%d/%s", oot_item_names[i],
+                                         oot_pouch_count(c, oot_item_names[i]), num);
+                if (used > 280 || i + 1 == OOT_ITEM_COUNT) hos_log("cheats: crawl: items (pouch/GameData):%s", line), used = 0;
+            }
+            /* (the member hashes of the Pouch and of the "got it once" struct: which names the game has, by MurmurHash3) */
+            static const uint32_t dumps[3] = {0x3da094e3u, 0xade0ef78u, 0xf80f8077u};
+            for (unsigned d = 0; mgr && d < 3; d++) {
+                const uint64_t e = oot_gd_struct(c, mgr, dumps[d]);
+                const uint64_t table = e ? recomp_load64(c, e + 8) : 0;
+                const uint32_t size = e ? recomp_load32(c, e + 0x14) : 0;
+                used = 0;
+                for (uint32_t i = 0; table && size <= 65536 && i < size; i++) {
+                    const uint32_t m = recomp_load32(c, table + 8ULL * i);
+                    const uint64_t cap = m && d == 2 ? oot_gd_int(c, mgr, recomp_load32(c, table + 8ULL * i + 4)) : 0;
+                    if (m && d == 2) used += (size_t)snprintf(line + used, sizeof line - used, " %08x=%d", m, cap ? (int)recomp_load32(c, cap + 0x1c) : -1);
+                    else if (m) used += (size_t)snprintf(line + used, sizeof line - used, " %08x", m);
+                    if (used > 280 || (i + 1 == size && used)) hos_log("cheats: crawl: members %08x:%s", dumps[d], line), used = 0;
+                }
+            }
+        }
+        if (try_banc) {
+            int child = 1;
+            const int known = oot_gamedata_bool(c, 0xcea220d3u, &child);   /* Sequence_IsChildhood */
+            const int flip = known && age >= 0 && age != child;
+            if (flip) oot_gamedata_set_bool(c, 0xcea220d3u, age);
+            crawl_banc = b, crawl_start = s, crawl_boot = e, crawl_go = g;
+            const int ok = oot_teleport(c, actor, 0);
+            crawl_banc = NULL;
+            if (!ok && flip) oot_gamedata_set_bool(c, 0xcea220d3u, child);
+            AcquireSRWLockExclusive(&crawl.lock);
+            if (ok) crawl.banc_pending = 0;
+            else crawl.retry_at = now + 2000000000LL;
+            ReleaseSRWLockExclusive(&crawl.lock);
+            if (ok) crawl_holding = 0, crawl_goto = 0;
+        }
+        if (where) {
+            char current[80];
+            int loading = 0, child = 1;
+            oot_gamedata_string(c, 0x1d6189dau, current, sizeof current);   /* Sequence_CurrentBanc */
+            oot_gamedata_bool(c, 0xef2b60c2u, &loading);                    /* Sequence_IsLoadingBanc */
+            oot_gamedata_bool(c, 0xcea220d3u, &child);
+            const uint64_t events = oot_singleton(c, OOT_EVENTMGR_SLOT);
+            hos_log("cheats: crawl: where: map \"%s\" loading %d event %d child %d pos %.1f %.1f %.1f", current, loading,
+                    events && recomp_load64(c, events + 104) ? 1 : 0, child, oot_load_float(c, actor + 796),
+                    oot_load_float(c, actor + 800), oot_load_float(c, actor + 804));
+        }
+        if (crawl_goto) crawl_holding = hold, crawl_actor = actor;
+        if (!hold || crawl_actor != actor) crawl_holding = 0;   /* (another Link: another map) */
+    }
+    if (!flying && action != 2 && action != 3 && !crawl_goto && !crawl_holding) return;
 
     // Follow OneShotPhysicsCctChangePosition to Link's controller.
     const unsigned offsets[] = {80, 32, 16, 8};
@@ -981,6 +1212,25 @@ static void oot_update_player_cheats(Ctx *c, uint64_t actor, uint64_t components
         marked_actor = actor;
         marked_controller = controller;
         hos_log("cheats: marked position %.2f %.2f %.2f", mark[0], mark[1], mark[2]);
+    }
+    if (crawl_goto || (crawl_holding && !flying)) {   /* (the crawl: Link put at its place, and kept there while held) */
+        const Ctx saved = *c;
+        const uint64_t arg = c->x[31] - 16;
+        for (unsigned i = 0; i < 3; i++) {
+            uint32_t bits;
+            memcpy(&bits, &crawl_target[i], sizeof bits);
+            recomp_store32_sp(c, arg + i * 4, bits);
+        }
+        recomp_store32_sp(c, arg + 12, 0);
+        c->x[31] = arg;
+        c->x[0] = controller;
+        c->x[1] = arg;
+        change_position(c);
+        *c = saved;
+        if (crawl_goto)
+            hos_log("cheats: crawl: Link put at %.1f %.1f %.1f%s", crawl_target[0], crawl_target[1], crawl_target[2],
+                    crawl_holding ? ", held" : "");
+        if (!flying && action != 2 && action != 3) return;
     }
     const int returning = action == 3 && marked_controller == controller;
     if (action == 3 && !returning) hos_log("cheats: no mark for this player controller");

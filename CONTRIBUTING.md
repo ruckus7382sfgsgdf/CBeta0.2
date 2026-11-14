@@ -42,7 +42,7 @@ Open an [issue](https://github.com/ruckus7382sfgsgdf/CBeta0.2/issues) and includ
 
 Before you report:
 
-- Try the [newest release](https://github.com/ruckus7382sfgsgdf/CBeta0.2/releases) first.
+- Try the [newest release](https://triforceproject.com) first.
 - Search the open issues; if yours is there, add your details to it.
 - For graphics or performance problems, test without ReShade, overlays, shader-cache tools and frame-generation
   injectors: they change what Triforce does.
@@ -70,7 +70,7 @@ versions do not work, and the build reads your files where they are without chan
 free and takes around 40 minutes; a run uses about 10 GB of RAM. Build on an SSD if you can.
 
 The easy way to get every tool a build needs is **Triforce Setup** from the
-[releases](https://github.com/ruckus7382sfgsgdf/CBeta0.2/releases): it installs the tools (Python with its packages,
+[releases](https://triforceproject.com): it installs the tools (Python with its packages,
 llvm-mingw, the Vulkan headers, FFmpeg, SDL2) into `%LOCALAPPDATA%\Programs\Triforce\tools`.
 
 To build from a clone instead:
@@ -101,6 +101,21 @@ on your real install.
 | `python -I nx2/make_game.py --check --nup "C:\path\your-game.nup"` | Check the game and its version without building. |
 
 The translated C and every build are local files; they are never committed.
+
+### RenoDX HDR (optional)
+
+RenoDX's tone mapping and HDR output for OoT (`gpu/vk/vk_renodx.cpp`) are built in only with RenoDX's Zelda OoT shaders
+(github.com/clshortfuse/renodx, MIT). They are worked from the game's own shaders, so neither they nor what is compiled
+from them (`renodx_spv.h`) is ever committed, bundled or uploaded. `--renodx` (the builder's RenoDX HDR tick) runs
+`scripts/renodx_shaders.py`, which fetches the sources at one pinned commit and the Slang compiler at one pinned
+release, each file checked against its SHA-256, and compiles them on the PC into a `renodx` folder beside the work
+folder (or `HOOKSHOT_RENODX=<folder>`). An `--update` of that game folder keeps it; `--no-renodx` drops it. In the game
+it works with the Insert menu's HDR set to Native, where its rows appear.
+
+Each replacement is named by the CRC-32 of the module the renderer's own emitter makes for that shader (the table in
+`scripts/renodx_shaders.py`). A change to the emitter changes those, and RenoDX then replaces nothing, with only its
+coverage line in the log to say so: dump the modules again (`RX_VK_DUMP_ALL_SPV=<folder>`) and match them by what they
+read. Never share a game folder built with it.
 
 ## Testing
 

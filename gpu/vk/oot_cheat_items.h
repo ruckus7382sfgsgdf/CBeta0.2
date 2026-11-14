@@ -37,10 +37,9 @@
     OOT_ITEM("Hookshot", "Item_Hookshot", 0) \
     OOT_ITEM("Longshot", "Item_Longshot", 0) \
     OOT_ITEM("Boomerang", "Item_Boomerang", 0) \
-    OOT_ITEM("Lens of Truth", "Item_GlassTruth", 0) \
+    OOT_ITEM("Lens of Truth", "Armor_GlassTruth", 0) \
     OOT_ITEM("Magic Beans", "Item_MagicBean", 1) \
     OOT_ITEM("Megaton Hammer", "Item_Hammer", 0) \
-    OOT_ITEM("Empty Bottle", "Item_Bottle", 1) \
     OOT_SECTION("Masks") \
     OOT_ITEM("Keaton Mask", "Armor_Child_Mask_Keaton", 0) \
     OOT_ITEM("Skull Mask", "Armor_Child_Mask_Skull", 0) \
@@ -51,7 +50,7 @@
     OOT_ITEM("Gerudo Mask", "Armor_Child_Mask_Gerudo", 0) \
     OOT_ITEM("Mask of Truth", "Armor_Child_Mask_Truth", 0) \
     OOT_SECTION("Upgrades") \
-    OOT_ITEM("Goron's Bracelet", "Item_Gauntlet_Goron", 0) \
+    OOT_ITEM("Goron's Bracelet", "Armor_Child_Gauntlet_Goron", 0) \
     OOT_ITEM("Silver Gauntlets", "Armor_Adult_Gauntlet_Silver", 0) \
     OOT_ITEM("Golden Gauntlets", "Armor_Adult_Gauntlet_Gold", 0) \
     OOT_ITEM("Silver Scale", "Item_Scale_Silver", 0) \

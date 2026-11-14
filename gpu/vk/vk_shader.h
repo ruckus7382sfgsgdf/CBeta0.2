@@ -23,11 +23,13 @@ struct Stage {
     VkShaderModule module = VK_NULL_HANDLE;
     Shader::Info info;
     std::vector<uint8_t> c1;   // its c1 constants (the code area's tail)
+    uint32_t crc = 0;          // (local, RenoDX port) the CRC-32 of the module the translation gave (fragment stages)
+    uint32_t renodx = 0;       // (local, RenoDX port) its module is RenoDX's replacement, named by the CRC-32 of the one replaced (0: not): the program takes set 1 (vk_renodx.h)
 };
 
 /// A texture handle the stage reads from a storage buffer: its handle program (Shader::Info::handle_programs, Eden's
 /// recompiler) run over the stage's constant banks and storage buffers as the draw has them
-uint32_t stage_handle(const NvnState& s, const Stage& st, uint32_t program);
+uint32_t stage_handle(const NvnState& s, const Stage& st, uint32_t program, uint32_t element = 0);
 
 /// A translated program variant: its stages, in descriptor order. The pipeline layout and pipelines made for it live
 /// in vk_pipeline.cpp (keyed by key).
@@ -47,9 +49,12 @@ struct Program {
     std::atomic<int> compute_state{0};
     mutable std::atomic<bool> dispatched{false};   // (hookshot) noted in triforce_computes.bin (vk_draw.cpp compute_note)
     bool push = false;             // its set is pushed (VK_KHR_push_descriptor)
+    uint32_t frag_crc = 0;         // (local, RenoDX port) its fragment stage's Stage::crc, for RX_VK_RENODX_TRACE
+    uint32_t renodx = 0;           // (local, RenoDX port) a stage is RenoDX's (its Stage::renodx): its layout has set 1, bound before each draw
     VkShaderStageFlags push_stages = 0;
     bool uses_render_area = false;
     bool uses_push = true;   // (a stage reads the push constants: render area or rescaling)
+    bool captures = false;   // (hookshot) its vertex stage stores its positions where pushed (vk_draw.cpp push_capture)
     bool mesh = false;              // task / mesh stages (VK_EXT_mesh_shader)
     // (hookshot) the GPU has no mesh shaders: the task and mesh stages are compute pipelines, and a generated vertex
     // stage reads the records they write. Its stages are (task,) mesh, vertex, fragment.

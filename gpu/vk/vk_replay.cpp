@@ -49,6 +49,7 @@
 #include "vk_present_trace.h"
 
 #include "vk_internal.h"
+#include "vk_renodx.h"
 #include "vk_work.h"   // (after the others: counts the commands that do GPU work, for full_barrier)
 
 namespace mkwvk {
@@ -3004,6 +3005,21 @@ void status_tick() {
 }
 
 std::atomic<bool> present_native_pq{false};   // (do_present: the game's picture is already HDR10)
+// (local fix, from the old HDR port) a colour format's bytes a texel, for the present's copy between formats of one size (0: not one of these)
+static uint32_t present_texel_bytes(VkFormat f) {
+    switch (f) {
+    case VK_FORMAT_R8G8B8A8_UNORM: case VK_FORMAT_R8G8B8A8_SRGB: case VK_FORMAT_B8G8R8A8_UNORM: case VK_FORMAT_B8G8R8A8_SRGB:
+    case VK_FORMAT_A2B10G10R10_UNORM_PACK32: case VK_FORMAT_A2R10G10B10_UNORM_PACK32: case VK_FORMAT_B10G11R11_UFLOAT_PACK32:
+    case VK_FORMAT_E5B9G9R9_UFLOAT_PACK32: case VK_FORMAT_R16G16_SFLOAT: case VK_FORMAT_R16G16_UNORM: case VK_FORMAT_R32_SFLOAT:
+        return 4;
+    case VK_FORMAT_R16G16B16A16_SFLOAT: case VK_FORMAT_R16G16B16A16_UNORM: case VK_FORMAT_R32G32_SFLOAT:
+        return 8;
+    case VK_FORMAT_R32G32B32A32_SFLOAT:
+        return 16;
+    default:
+        return 0;
+    }
+}
 uint64_t present_value = 0;   // (the present job's value, handed out as it came; 0: the next one)
 struct PendingShot {
     bool on = false;
@@ -3023,6 +3039,7 @@ void do_present(const nvn_tex* t, const int crop[4]) {
     // (hookshot) NVIDIA Reflex (vk_reflex.cpp): this frame's simulation ended, its submission starts; on the way out (after the
     // present) the driver's sleep until the next frame should begin. AMD Anti-Lag 2 (vk_antilag.cpp) waits there as well: the
     // next frame's input stage
+    renodx_present();   // (local, RenoDX port) its settings as the menu has them now
     temporal_idle();   // (DLSS, FSR: their video memory let go once not used for a while)
     status_tick();   // (the status line, and the video-memory warning)
     reflex_present_begins();
@@ -3058,9 +3075,64 @@ void do_present(const nvn_tex* t, const int crop[4]) {
                  t ? t->d.width : 0, t ? t->d.height : 0, t ? t->d.format : 0,
                  tex ? (tex->gpu_written ? "rendered" : "never rendered") : "no image");
         if (tex) src = tex->image, sw = tex->width, sh = tex->height;
+        // (local fix, from the old HDR port) the present's own format, when the image found at the window texture's storage was
+        // made in another format of the same texel size: HDR turned to Native in play, the game writes RGB10A2 into the window
+        // textures that were made as RGBA8. Their bits are copied as they are into an image of the present's format, so a
+        // blit reads them as what they are. Each change of the presented format is logged
+        const VkFormat want_fmt = t ? vk_format((int)t->d.format).format : VK_FORMAT_UNDEFINED;
+        {
+            static uint32_t last_fmt = ~0u;
+            if (t && (uint32_t)t->d.format != last_fmt) {
+                last_fmt = (uint32_t)t->d.format;
+                logf("vk: present format %#x (vk %d): the image there is vk %d, %s", (unsigned)t->d.format, (int)want_fmt,
+                     tex ? (int)tex->format : -1, tex ? (tex->gpu_written ? "rendered" : "never rendered") : "no image");
+            }
+        }
+        if (tex && src && !dev.offscreen) {
+            const uint32_t bytes = present_texel_bytes(want_fmt);
+            if (want_fmt != VK_FORMAT_UNDEFINED && tex->format != want_fmt && bytes && bytes == present_texel_bytes(tex->format)) {
+                struct Retyped { VkImage image = VK_NULL_HANDLE; VmaAllocation alloc = nullptr; VkFormat f = VK_FORMAT_UNDEFINED; uint32_t w = 0, h = 0; };
+                static Retyped ring[4];   // (frames in flight: the display thread blits one while the next is recorded)
+                static unsigned at_ring;
+                Retyped& rt = ring[at_ring++ % 4];
+                if (rt.f != want_fmt || rt.w != sw || rt.h != sh) {
+                    if (rt.image) {
+                        {
+                            std::lock_guard qk(dev.present_mu);   // (the old one may still be in a blit)
+                            device_wait_idle_locked();
+                        }
+                        destroy_image(rt.image, rt.alloc);
+                        rt = Retyped{};
+                    }
+                    VkImageCreateInfo ic{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
+                    ic.imageType = VK_IMAGE_TYPE_2D, ic.format = want_fmt, ic.extent = {sw, sh, 1}, ic.mipLevels = 1, ic.arrayLayers = 1;
+                    ic.samples = VK_SAMPLE_COUNT_1_BIT, ic.tiling = VK_IMAGE_TILING_OPTIMAL;
+                    ic.usage = VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
+                    if (create_image(ic, rt.image, rt.alloc)) {
+                        rt.f = want_fmt, rt.w = sw, rt.h = sh;
+                        image_barrier(r.cmd, rt.image, VK_IMAGE_LAYOUT_UNDEFINED, VK_IMAGE_LAYOUT_GENERAL);
+                        static int told;
+                        if (told++ < 4) logf("vk: present: the window texture's image is vk format %d, the present's %d: copied as %d",
+                                             (int)tex->format, (int)want_fmt, (int)want_fmt);
+                    } else {
+                        rt = Retyped{};
+                    }
+                }
+                if (rt.image) {
+                    full_barrier(r.cmd);
+                    VkImageCopy c{};
+                    c.srcSubresource = c.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+                    c.extent = {sw, sh, 1};
+                    vkCmdCopyImage(r.cmd, src, VK_IMAGE_LAYOUT_GENERAL, rt.image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+                    full_barrier(r.cmd);
+                    src = rt.image;
+                }
+            }
+        }
         // (the Insert menu's HDR set to Native: the game, told its display is HDR10, presents PQ codes in RGB10A2 (vk
-        // A2B10G10R10); that picture goes to the HDR10 swapchain as it is, not through the SDR-to-HDR pass)
-        present_native_pq.store(tex && dev.hdr && opts.hdr == 2 && tex->format == VK_FORMAT_A2B10G10R10_UNORM_PACK32,
+        // A2B10G10R10); that picture goes to the HDR10 swapchain as it is, not through the SDR-to-HDR pass. Local fix: by the
+        // format the game presents, not the cached image's, which stays RGBA8 when HDR is turned on in play)
+        present_native_pq.store(tex && dev.hdr && opts.hdr == 2 && want_fmt == VK_FORMAT_A2B10G10R10_UNORM_PACK32,
                                 std::memory_order_relaxed);
         if (tex && !dev.offscreen && (opts.upscale || opts.sharpness || dev.hdr || wide_sides_possible())) {   // (and ultrawide's menu sides)
             // Keep the sampled view with the same cached image as the direct present, before advancing its age.
@@ -3658,7 +3730,10 @@ void present_image(VkImage src, uint32_t sw, uint32_t sh, const int crop[4], VkI
     }
     const VkImage scaled = src && view ? framegen_scale(f.cmd, view, src, sw, sh, crop, rect.w, rect.h) : VK_NULL_HANDLE;
     // (hookshot) the Insert menu's HDR: the picture (scaled, or the game's own with its crop) to HDR10, copied in as the SDR one is
-    const VkImage hdr_image = dev.hdr && src && view && !present_native_pq.load(std::memory_order_relaxed)
+    // (lab, 11-13) RX_VK_TEST_HDR_PASS=1: the HDR pass on a screen that is not HDR (its colours are wrong there, by design):
+    // whether the pass gets a picture at all can be seen without an HDR display
+    static const bool test_hdr = getenv("RX_VK_TEST_HDR_PASS") != nullptr;
+    const VkImage hdr_image = (dev.hdr || test_hdr) && src && view && !present_native_pq.load(std::memory_order_relaxed)
         ? (scaled ? framegen_hdr(f.cmd, framegen_scaled_view(), rect.w, rect.h, nullptr, rect.w, rect.h)
                   : framegen_hdr(f.cmd, view, sw, sh, crop, rect.w, rect.h))
         : VK_NULL_HANDLE;

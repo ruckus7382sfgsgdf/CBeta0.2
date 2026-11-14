@@ -49,6 +49,7 @@
 #include "vk_fsr3fi.h"    // (the Frame generation row: whether FSR 3.1 makes the frame)
 #include "vk_fsr4.h"
 #include "vk_temporal.h"
+#include "vk_renodx.h"    // (renodx_built: the RenoDX rows only in a build with its shaders)
 #include "vk_reflex.h"
 #include "vk_antilag.h"
 #include "upscaler_rows.h"
@@ -213,6 +214,7 @@ const char* hn_upscaler(int v, int variant) {
         "DLSS and DLAA: need a newer NVIDIA driver.",
         "DLSS and DLAA: DLSS's runtime was not found (the game folder's ngx folder, see the readme).",
         "DLSS and DLAA: NVIDIA's NGX on Linux loads DLSS's runtime only from a folder named in ASCII (see the readme).",
+        "DLSS and DLAA: NVIDIA's NGX started but gave DLSS nothing to work with (see the log).",
     };
     static const char* const fsr_no[FSR_WHY_COUNT] = {
         nullptr,
@@ -281,6 +283,15 @@ const char* tx_aniso(int v) {   // (Triforce: the Texture filtering row)
 const char* tx_percent(int v) {
     static char b[8];
     snprintf(b, sizeof b, "%d%%", v);
+    return b;
+}
+// (local, RenoDX port: vk_renodx.cpp)
+const char* tx_rdx_tonemap(int v) { return v ? "PsychoV35" : "Vanilla"; }
+const char* tx_rdx_midgray(int v) { return v == 1 ? "Vanilla" : v == 2 ? "Eye adaptation" : "Render"; }
+const char* tx_rdx_space(int v) { return v == 1 ? "BT.709" : v == 2 ? "DCI-P3" : "Vanilla"; }
+const char* tx_rdx_grade(int v) {
+    static char b[8];
+    snprintf(b, sizeof b, "%d", v);
     return b;
 }
 // The output the menu's sizes are shown for: the Output resolution row's (applied at the next start), so the rows below follow a change
@@ -634,6 +645,38 @@ Row rows[] = {
      "How bright the picture's white is with HDR on. Around 200 for a normal room; higher in a bright one.", nullptr, false, true},
     {TAB_DISPLAY, "HDR peak brightness", &opts.hdr_peak, 400, 4000, 100, tx_nits,
      "The brightest highlights with HDR on: set it to your display's peak brightness.", nullptr, false, true},
+    // (Triforce, 11-13: RenoDX is in every build and off until this row turns it on. The scene's format is chosen at the
+    // start, host/nn_vi.c hos_scene_rgba16f: a restart)
+    {TAB_DISPLAY, "RenoDX HDR", &opts.renodx, 0, 1, 1, tx_onoff,
+     "With HDR set to Native: RenoDX's tone mapping, eye adaptation and colour grading in place of the game's own, and its "
+     "rows below. Off: the game's own HDR. Applies after a restart. RenoDX is by Carlos Lopez (clshortfuse), under the MIT "
+     "license.", nullptr, true, true},
+    // (local, RenoDX port: vk_renodx.cpp. Shown with HDR Native, where its shaders run)
+    {TAB_DISPLAY, "RenoDX tonemapper", &opts.rdx_tonemap, 0, 1, 1, tx_rdx_tonemap,
+     "With HDR Native: how the scene's light is brought to the display. Vanilla: the game's own curve. PsychoV35: RenoDX's, "
+     "which keeps hue and saturation into the highlights, up to the peak brightness. RenoDX is by Carlos Lopez "
+     "(clshortfuse), under the MIT license.", nullptr, false, true},
+    {TAB_DISPLAY, "RenoDX midgray", &opts.rdx_midgray, 0, 2, 1, tx_rdx_midgray,
+     "With PsychoV35: what the scene's middle grey is held to. Render: as rendered. Vanilla: where the game's own curve puts it. "
+     "Eye adaptation: it follows what is on screen over a few seconds, weighted towards the middle of the view, as eyes adjust.",
+     nullptr, false, true},
+    {TAB_DISPLAY, "RenoDX UI brightness", &opts.rdx_ui_white, 80, 400, 10, tx_nits,
+     "How bright the menus' and the HUD's white is with RenoDX's tonemapper. The scene's follows HDR paper white.", nullptr, false, true},
+    {TAB_DISPLAY, "RenoDX color space", &opts.rdx_space, 0, 2, 1, tx_rdx_space,
+     "The colours the picture is taken to be in before HDR10's. Vanilla: the game's own matrix. BT.709: as the SDR picture. "
+     "DCI-P3: more saturated.", nullptr, false, true},
+    {TAB_DISPLAY, "RenoDX exposure", &opts.rdx_exposure, 0, 200, 5, tx_percent,
+     "The scene's brightness before RenoDX's tone mapping. 100% is the game's.", nullptr, false, true},
+    {TAB_DISPLAY, "RenoDX highlights", &opts.rdx_highlights, 0, 100, 5, tx_rdx_grade,
+     "RenoDX's colour grading: the bright parts of the scene. 50 is neutral.", nullptr, false, true},
+    {TAB_DISPLAY, "RenoDX shadows", &opts.rdx_shadows, 0, 100, 5, tx_rdx_grade,
+     "RenoDX's colour grading: the dark parts of the scene. 50 is neutral.", nullptr, false, true},
+    {TAB_DISPLAY, "RenoDX contrast", &opts.rdx_contrast, 0, 100, 5, tx_rdx_grade,
+     "RenoDX's colour grading: the scene's contrast. 50 is neutral.", nullptr, false, true},
+    {TAB_DISPLAY, "RenoDX saturation", &opts.rdx_saturation, 0, 100, 5, tx_rdx_grade,
+     "RenoDX's colour grading: the scene's saturation. 50 is neutral.", nullptr, false, true},
+    {TAB_DISPLAY, "RenoDX bloom", &opts.rdx_bloom, 0, 100, 5, tx_rdx_grade,
+     "How strong the glow around bright things is. 50 is the game's.", nullptr, false, true},
     {TAB_DISPLAY, "Game frame rate cap", &opts.fps_cap, 0, 5, 1, tx_fps_cap,
      "Limits frames rendered by the game. Generated frames are additional. Takes a restart. "
      "Past 60 is experimental: the game keeps real time, but some cutscenes and bosses can misbehave (Gohma, the intro's "
@@ -651,6 +694,11 @@ Row rows[] = {
      hn_upscaler},
     {TAB_GRAPHICS, "DLSS model", &opts.dlss_model, 0, ur::kModels - 1, 1, tx_dlss_model,
      "Which of NVIDIA's DLSS networks draws the picture.", hn_dlss_model, false, true},
+    // (Triforce, 11-13: vk_temporal.cpp pre_wanted, off until asked)
+    {TAB_GRAPHICS, "Upscale before bloom", &opts.upscale_pre, 0, 1, 1, tx_onoff,
+     "With NVIDIA DLSS, DLAA or AMD FSR as the Upscaler: On, it works on the scene before the game's glow and tone mapping, "
+     "so both are made from the sharpened scene. Off: on the finished picture, as before. Applies after a restart.",
+     nullptr, true, true},
     // (Triforce: read once, at the start (host/nn_vi.c): Auto -> 100% in game left the 3D at the dynamic path's size)
     {TAB_GRAPHICS, "Render resolution", &opts.resolution, 0, ur::kValues - 1, 1, tx_resolution,
      "The share of the output the 3D is drawn at; the Upscaler fills in the rest. Applies after a restart.", hn_resolution, true},
@@ -803,6 +851,14 @@ int64_t embed_since = 0;                   // (when that screen was first seen r
 constexpr int kGameTab = 99;               // (the tabs' hit for the game's own tab)
 bool embed_allowed() {
     static const bool on = !getenv("TRIFORCE_OPTIONS_TABS") || atoi(getenv("TRIFORCE_OPTIONS_TABS")) != 0;
+    return on;
+}
+/// (Triforce, 11-13, the user: "Remove f1 menu (we have it in options now natively)") Whether Insert, F1, a gamepad's Home and
+/// Select+Start open these options over the game from anywhere. Not any more: they are the tabs inside the game's own
+/// Options screen. TRIFORCE_INGAME_MENU=1 (triforce_env.txt) brings the keys back; with TRIFORCE_OPTIONS_TABS=0 (no tabs in
+/// the game's screen) they stay, or there would be no way to the options at all
+bool overlay_allowed() {
+    static const bool on = (getenv("TRIFORCE_INGAME_MENU") && atoi(getenv("TRIFORCE_INGAME_MENU")) != 0) || !embed_allowed();
     return on;
 }
 /// The game's Options screen ran within the last quarter second
@@ -1013,10 +1069,20 @@ int ask_sel = 0;   // (the restart question's choice: 0 Later, 1 Restart now)
 
 /// A row on its tab: the debug tools only with them on, the Upscaler only in a build with DLSS or FSR 4, or where AMD
 /// FSR 3.1 runs
+bool rdx_row(const int* v) {   // (local, RenoDX port)
+    return v == &opts.rdx_tonemap || v == &opts.rdx_midgray || v == &opts.rdx_ui_white || v == &opts.rdx_space || v == &opts.rdx_exposure ||
+           v == &opts.rdx_highlights || v == &opts.rdx_shadows || v == &opts.rdx_contrast || v == &opts.rdx_saturation ||
+           v == &opts.rdx_bloom;
+}
 bool row_shown(int i) {
     return (rows[i].cheat < 0 || cheats_on()) &&
            (rows[i].value != &opts.dlss || ur::upscaler_shown(dlss_built() || fsr4_built(), fsr3::supported())) &&
-           (rows[i].value != &opts.dlss_model || ur::model_shown(dlss_built()));
+           (rows[i].value != &opts.dlss_model || ur::model_shown(dlss_built())) &&
+           // (local, RenoDX port: its rows with HDR Native, in a build with its shaders; Triforce: and its own row on)
+           (!rdx_row(rows[i].value) || (opts.hdr == 2 && renodx_built() && opts.renodx)) &&
+           (rows[i].value != &opts.renodx || renodx_built()) &&
+           // (Triforce, 11-13: the Menu shortcut row chooses the keys that open the options from anywhere: gone with them)
+           (rows[i].value != &opts.menu_shortcut || overlay_allowed());
 }
 int tab_row_count(int t) {
     int c = 0;
@@ -2493,6 +2559,13 @@ void startup_screen(const StartupView* view) {
     startup_on.store(true, std::memory_order_release);
 }
 
+int hdr_at_start = 0;
+int renodx_at_start = 0, upscale_pre_at_start = 0;
+bool renodx_chosen() {
+    static const char* const e = getenv("RX_VK_RENODX");
+    return e && *e ? atoi(e) != 0 : renodx_at_start != 0;
+}
+
 void menu_init() {
     static bool done;
     if (done) return;
@@ -2532,6 +2605,8 @@ void menu_init() {
             }
         }
         fclose(f);
+        hdr_at_start = opts.hdr;   // (local, RenoDX port: vk_menu.h)
+        renodx_at_start = opts.renodx, upscale_pre_at_start = opts.upscale_pre;
         // (the saved microphone by its name, not its place; the host told the row's choice. Off or the default: no list, no SDL
         // audio at the start)
         if (!mic_want.empty()) refresh_mics();
@@ -2923,7 +2998,9 @@ void menu_tick() {
     // (Triforce) Setup chooses the settings before the game starts, and the menu was hidden for that. 11-10: on by default again,
     // for upstream's new rows that Setup has no place for yet. TRIFORCE_INGAME_MENU=0 (triforce_env.txt) hides it: Insert, F1,
     // Home and Select+Start then open nothing
-    static const bool menu_allowed = !getenv("TRIFORCE_INGAME_MENU") || atoi(getenv("TRIFORCE_INGAME_MENU")) != 0;
+    // (Triforce, 11-13: off by default now, overlay_allowed above. While the options are open, from inside the game's Options,
+    // the keys still close them)
+    static const bool menu_allowed = overlay_allowed();
     if ((press[0] || press[6]) && open_now.load() && page == 5) {
         later();
     } else if ((press[0] || press[6]) && open_now.load() && restart_ask()) {
@@ -2953,6 +3030,7 @@ void menu_tick() {
             logf("menu: restart now, to apply %s", restart_list(", ").c_str());
             save();
             pipeline_cache_save(true);
+            memory_trial_orderly_end();   // (an exit on purpose: no verdict on the memory trial)
             open_now = false, page = 0, changed = true;
             PostMessageA(app_window(), WM_APP + 9, 0, 0);
         }
@@ -3173,6 +3251,7 @@ void menu_tick() {
                 } else {   // (as Restart now: saved first, as the window's own close does not force the pipeline cache)
                     save();
                     pipeline_cache_save(true);
+                    memory_trial_orderly_end();
                     pending = nullptr;
                     if (&r == &rows[kRestartRow]) {   // (the restart question's Restart now: the window closes, then the game starts again)
                         logf("menu: restart");

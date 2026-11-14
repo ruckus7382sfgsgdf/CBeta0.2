@@ -84,6 +84,7 @@ void ensure_layout(Program&) {}
 // These cases use non-fallback programs, whose topology stays unchanged.
 int pipeline_topology(const Program&, int drawn) { return drawn; }
 PipeEntry* graphics_pipeline(const Program&, NvnState&, const Targets&, int, const unsigned char*) { return &pipe_entry; }
+@WRITES_MEMORY@
 void decision(const Program* cp, const Targets& at) {
     NvnState s; DrawArgs d; int cmd = 0, topo = 0; unsigned char types[8]{};
 @BLOCK@
@@ -135,13 +136,16 @@ def main():
     args = parser.parse_args()
     src = (args.source / "gpu/vk/vk_draw.cpp").read_text(encoding="utf-8")
     try:
+        helper_start = src.index("static bool writes_memory(const Program& p)")
+        helper_end = src.index("enum class FallbackRole", helper_start)
         start = src.index("    static const bool always_wait =", src.index("void draw(VkCommandBuffer"))
         end = src.index("    cur_program = &p;", start)
     except ValueError:
         raise SystemExit("draw readiness block changed; update this test's extraction anchors") from None
+    fixture = FIXTURE.replace("@WRITES_MEMORY@", src[helper_start:helper_end]).replace("@BLOCK@", src[start:end])
     with tempfile.TemporaryDirectory(prefix="draw-side-effects-") as tmp:
         cpp, exe = Path(tmp) / "test.cpp", Path(tmp) / "test"
-        cpp.write_text(FIXTURE.replace("@BLOCK@", src[start:end]), encoding="utf-8")
+        cpp.write_text(fixture, encoding="utf-8")
         subprocess.run([args.cxx, "-std=c++20", "-Wall", "-Wextra", "-Wno-unused-variable",
                         str(cpp), "-o", str(exe)], check=True, timeout=60)
         failed = False

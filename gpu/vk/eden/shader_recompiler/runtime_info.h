@@ -88,6 +88,12 @@ struct RuntimeInfo {
     VaryingState previous_stage_stores;
     /// Fragment stage after a mesh program: generic inputs it writes per primitive.
     std::bitset<32> per_primitive_generics{};
+    /// Last pre-rasterization stage: generic outputs the fragment stage reads screen-linear.
+    /// They are written times Position.w and the fragment stage reads them perspective-correct
+    /// times FragCoord.w, so clipping a primitive close to the camera interpolates them right.
+    std::bitset<32> noperspective_outputs{};
+    /// Fragment stage: the previous stage writes noperspective_outputs (not a mesh program).
+    bool scaled_noperspective_inputs{};
     /// Fragment stage after a mesh program that draws points: generic inputs the hardware's point sprite
     /// replaces with the coordinate within the point (s, t, 0, 1), as NVN's do with the generics the mesh
     /// program leaves unwritten.
@@ -111,6 +117,10 @@ struct RuntimeInfo {
     u32 mesh_fallback_task_threads{};
     /// (hookshot) the fallback's record slots: mesh workgroups past this one write nothing
     u32 mesh_fallback_capacity{};
+    /// (hookshot) a vertex stage that also stores its final position (clip space, after convert_depth_mode) at a pushed
+    /// device address, one vec4 a vertex: the temporal upscaler's motion of what the game moves in its shaders
+    /// (vk_temporal.cpp). A zero address stores nothing (Info::captures_position says it was emitted)
+    bool capture_position{};
 
     TessPrimitive tess_primitive{};
     TessSpacing tess_spacing{};

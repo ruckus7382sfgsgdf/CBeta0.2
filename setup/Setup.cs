@@ -1,5 +1,5 @@
 ﻿// Triforce Setup: the one file players download. It installs itself (per user, no admin), keeps itself and the Triforce tools up to
-// date from the GitHub releases of ruckus7382sfgsgdf/CBeta0.2, turns the player's own game files into a game folder (nx2/make_game.py from
+// date from the releases at triforceproject.com (triforce/downloads on its Forgejo), turns the player's own game files into a game folder (nx2/make_game.py from
 // the tools) and starts the game. The game's own update offer (host/hos_update.c) starts it again with --update <folder>.
 //
 // Built for .NET Framework 4.8 (part of Windows 10 and 11): nothing to install, one small exe. setup/build.ps1 compiles it.
@@ -33,7 +33,12 @@ namespace TriforceSetup;
 
 static class Program
 {
-    public const string Repo = "ruckus7382sfgsgdf/CBeta0.2";
+    // (11-13: Triforce's own home. Releases are published in triforce/downloads on its Forgejo; the list is asked on the main
+    // domain, which passes /api/v1 on, so the address outlives whatever answers behind it. Forgejo's list has GitHub's
+    // names (tag_name, assets[].name / browser_download_url / size) and takes limit= where GitHub took per_page=.
+    // Up to v0.3.5 this was api.github.com/repos/ruckus7382sfgsgdf/CBeta0.2: those builds ask there and nowhere else)
+    public const string Home = "https://triforceproject.com";
+    public const string ReleaseApi = Home + "/api/v1/repos/triforce/downloads/releases?limit=1";
     public const string SetupAsset = "TriforceSetup.exe";
     public const string ToolsAsset = "Triforce-Tools.zip";
     public const string AppName = "Triforce";
@@ -235,7 +240,7 @@ static class Install
         Write(UninstallKey, "InstallLocation", dir);
         Write(UninstallKey, "UninstallString", "\"" + exe + "\" --uninstall");
         Write(UninstallKey, "QuietUninstallString", "\"" + exe + "\" --uninstall --quiet");
-        Write(UninstallKey, "URLInfoAbout", "https://github.com/" + Program.Repo);
+        Write(UninstallKey, "URLInfoAbout", Program.Home);
         Write(UninstallKey, "NoModify", 1);
         Write(UninstallKey, "NoRepair", 1);
         Set("Desktop", desktop ? "1" : "0");
@@ -307,7 +312,7 @@ sealed class Release
     public static async Task<Release> Latest(HttpClient http, CancellationToken token)
     {
         var url = Environment.GetEnvironmentVariable("TRIFORCE_RELEASE_API") is { Length: > 0 } o ? o
-            : "https://api.github.com/repos/" + Program.Repo + "/releases?per_page=1";   // (the newest, pre-releases too: /latest skips them)
+            : Program.ReleaseApi;   // (the newest, pre-releases too)
         using var ask = new CancellationTokenSource(TimeSpan.FromSeconds(20));
         using var both = CancellationTokenSource.CreateLinkedTokenSource(token, ask.Token);
         using var response = await http.GetAsync(url, both.Token);
@@ -318,7 +323,7 @@ sealed class Release
         return r;
     }
 
-    /// GitHub's answer, read with a real JSON parser: a list of releases (the newest first) or one release. Each asset's
+    /// The release list's answer (Forgejo's, GitHub's before: the same names), read with a real JSON parser: a list of releases (the newest first) or one release. Each asset's
     /// object holds a nested "uploader" object, so nothing simpler than a parser reads it right (v0.1.0 found no assets)
     public static Release Parse(string json)
     {
@@ -453,7 +458,8 @@ sealed class Runner
     public event Action<string>? Line;
     public event Action<string?>? Finished;
 
-    public Runner(Tools tools, List<string> args) { this.tools = tools; this.args = args; }
+    readonly string? ngxSdk;   // (NVIDIA DLSS chosen, its license accepted: the folder NVIDIA's SDK is fetched into and built from)
+    public Runner(Tools tools, List<string> args, string? ngxSdk = null) { this.tools = tools; this.args = args; this.ngxSdk = ngxSdk; }
 
     static string Quote(string a)
     {
@@ -470,7 +476,7 @@ sealed class Runner
         return sb.Append('"').ToString();
     }
 
-    static ProcessStartInfo Info(Tools tools, IEnumerable<string> args)
+    static ProcessStartInfo Info(Tools tools, IEnumerable<string> args, string? ngxSdk = null)
     {
         var all = new List<string> { "-I", Path.Combine(tools.Root, "nx2", "make_game.py") };
         all.AddRange(args);
@@ -485,6 +491,7 @@ sealed class Runner
             StandardErrorEncoding = Encoding.UTF8,
         };
         si.EnvironmentVariables["PYTHONIOENCODING"] = "utf-8";
+        if (ngxSdk != null) si.EnvironmentVariables["HOOKSHOT_NGX_SDK"] = ngxSdk;   // (nx2/make_game.py --fetch-ngx-sdk, nx2/build.py)
         // (written into the game folder: the game starts Setup again from here to update, host/hos_update.c)
         var installed = Install.InstalledDir is { } d ? Path.Combine(d, Program.SetupAsset) : Install.Self;
         si.EnvironmentVariables["HOOKSHOT_BUILDER_EXE"] = installed;
@@ -508,7 +515,7 @@ sealed class Runner
                     var i = args.IndexOf(name);
                     if (i >= 0 && i + 1 < args.Count && !Install.Allowed(args[i + 1])) { Finished?.Invoke(Install.TestOnly); return; }
                 }
-                using var p = Process.Start(Info(tools, args))!;
+                using var p = Process.Start(Info(tools, args, ngxSdk))!;
                 process = p;
                 p.ErrorDataReceived += (_, e) => { if (e.Data != null) Line?.Invoke(e.Data); };
                 p.BeginErrorReadLine();

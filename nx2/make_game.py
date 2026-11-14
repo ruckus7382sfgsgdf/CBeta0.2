@@ -1272,6 +1272,40 @@ def fsr_wanted(a, out):
     return bool(getattr(a, "fsr", False)) or bool(a.update and os.path.isfile(os.path.join(out, FSR_MARK)))
 
 
+RENODX_MARK = ".hookshot_renodx"   # (in a game folder built with RenoDX's HDR: --update builds it with RenoDX again)
+
+
+def renodx_wanted(a, out):
+    """RenoDX's HDR in this build. (Triforce, 11-13: every build has it, not only one that asks with --renodx; --no-renodx
+    builds without. It acts only with the Insert menu's HDR set to Native.)"""
+    return not getattr(a, "no_renodx", False)
+
+
+def prepare_renodx(work):
+    """--renodx: RenoDX's shaders fetched and compiled before the build (scripts/renodx_shaders.py), into HOOKSHOT_RENODX when
+    set, else a renodx folder beside the work folder. Only what is missing or not the file expected is downloaded, and the
+    shaders are compiled again only when the script's pinned sources or compiler changed. Returns the folder"""
+    import importlib.util
+    path = os.path.join(ROOT, "scripts", "renodx_shaders.py")
+    if not os.path.isfile(path):   # (the AppImage carries no scripts/: its Vulkan back end comes built, without RenoDX)
+        print("RenoDX's HDR: this builder does not carry %s: built without RenoDX" % path, flush=True)
+        return None
+    spec = importlib.util.spec_from_file_location("renodx_shaders", path)
+    renodx = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(renodx)
+    folder = os.environ.get("HOOKSHOT_RENODX") or os.path.join(os.path.dirname(work), "renodx")
+    print(renodx.NOTICE, flush=True)
+    try:
+        renodx.prepare(folder, "linux" if LINUX else "windows", say=lambda line: print(line, flush=True))
+    except (OSError, ValueError) as e:
+        # (Triforce, 11-13: RenoDX is in every build now, so a PC without a connection, or a download that is not the file
+        # expected, must not stop the game's build: this one is made without RenoDX and says so; the next build tries again)
+        print("RenoDX's shaders could not be fetched or compiled (%s): this build is made without RenoDX's HDR. The next "
+              "build tries again." % e, flush=True)
+        return None
+    return folder
+
+
 def place_ngx_runtime(out):
     """(NVIDIA DLSS) a game built with NVIDIA's SDK (HOOKSHOT_NGX_SDK, as nx2/build.py takes it) gets DLSS's runtime in its ngx
     folder, where gpu/vk/vk_dlss.cpp looks first: nvngx_dlss.dll on Windows, libnvidia-ngx-dlss.so.<version> on Linux. Never
@@ -1318,6 +1352,11 @@ def parse_args():
     # (AMD FSR 4, off unless asked: nothing is downloaded. gpu/vk/vk_fsr4.cpp)
     p.add_argument("--fsr", action="store_true", help="build with AMD FSR 4 (AMD's DLLs are not included: see the readme)")
     p.add_argument("--no-fsr", action="store_true", help="with --update: build without AMD FSR 4 even if the folder had it")
+    # (RenoDX's HDR, in every build since 11-13: its shaders and the Slang compiler are downloaded and compiled here.
+    # scripts/renodx_shaders.py, gpu/vk/vk_renodx.cpp)
+    p.add_argument("--renodx", action="store_true",
+                   help="kept for old command lines: every build has RenoDX's HDR now (its shaders and the Slang compiler are downloaded, about 60 MB)")
+    p.add_argument("--no-renodx", action="store_true", help="build without RenoDX's HDR: nothing of it is downloaded")
     a = p.parse_args()
     if a.prepare:   # (first: a bad --game below is said as RecompLauncher's "error" line)
         global PREPARE
@@ -1395,6 +1434,26 @@ def main(a=None):
         os.environ.pop("HOOKSHOT_FSR", None)
         if os.path.isfile(os.path.join(out, FSR_MARK)):
             os.remove(os.path.join(out, FSR_MARK))
+    # (RenoDX's HDR: its shaders made first, then the build's switch for nx2/build.py and the folder's mark for the next
+    # --update)
+    if renodx_wanted(a, out):
+        if os.environ.get("HOOKSHOT_VK_PREBUILT"):   # (the AppImage's back end, built without RenoDX)
+            print("RenoDX's HDR: this build uses the prebuilt Vulkan back end (HOOKSHOT_VK_PREBUILT), which has no RenoDX: built "
+                  "without it", flush=True)
+            os.environ.pop("HOOKSHOT_RENODX", None)
+        else:
+            renodx_folder = prepare_renodx(work)
+            if renodx_folder:
+                os.environ["HOOKSHOT_RENODX"] = renodx_folder
+                open(os.path.join(out, RENODX_MARK), "w").close()
+            else:
+                os.environ.pop("HOOKSHOT_RENODX", None)
+                if os.path.isfile(os.path.join(out, RENODX_MARK)):
+                    os.remove(os.path.join(out, RENODX_MARK))
+    else:
+        os.environ.pop("HOOKSHOT_RENODX", None)
+        if os.path.isfile(os.path.join(out, RENODX_MARK)):
+            os.remove(os.path.join(out, RENODX_MARK))
     exefs = os.path.join(work, "exefs")
     romfs = os.path.join(out, "romfs")
 

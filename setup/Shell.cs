@@ -225,7 +225,27 @@ sealed partial class Shell
         BrowseB.Click += (_, _) => RomfsPath.Text = FolderPicker.Pick(Window, "Choose the romfs folder", RomfsPath.Text) ?? RomfsPath.Text;
         BrowseC.Click += (_, _) => ExefsPath.Text = FolderPicker.Pick(Window, "Choose the exefs folder", ExefsPath.Text) ?? ExefsPath.Text;
         BrowseD.Click += (_, _) => OutPath.Text = FolderPicker.Pick(Window, "Choose where to save the game", OutPath.Text) ?? OutPath.Text;
-        BuildButton.Click += (_, _) => StartBuild();
+        // (11-13, a player's note: "If you click Build game folder there is no option to go back", and a second build of a game
+        // already built started at one click: 45 minutes and the same game again. Back goes home; Build asks first then)
+        BuildButton.Click += (_, _) =>
+        {
+            if (HasGame) Ask("You have already built a game folder. Do you want to build it again? It takes about 45 minutes.", "Build again", T(S.Back), StartBuild);
+            else StartBuild();
+        };
+        SetupBack = Part<Button>("SetupBack");
+        // (11-13) NVIDIA DLSS in the game that is built: NVIDIA's files come under NVIDIA's own license, so the tick stays only
+        // once that is accepted. Kept (Dlss=1): an update builds with it again
+        DlssTick = Part<CheckBox>("DlssTick");
+        DlssTick.IsChecked = DlssChosen;
+        DlssTick.Click += (_, _) =>
+        {
+            if (DlssTick.IsChecked != true) { Install.Set("Dlss", "0"); return; }
+            DlssTick.IsChecked = false;
+            Ask("NVIDIA DLSS is NVIDIA's, under NVIDIA's own license (github.com/NVIDIA/DLSS, LICENSE.txt). Its files are downloaded to " +
+                "this PC; a game folder built with them must not be shared. Do you accept NVIDIA's license?", "I accept", T(S.Back),
+                () => { DlssTick.IsChecked = true; Install.Set("Dlss", "1"); });
+        };
+        SetupBack.Click += (_, _) => ShowHome(homeOffline);
         CancelButton.Click += (_, _) => { fetch?.Cancel(); runner?.Cancel(); };
         BackButton.Click += (_, _) => ShowSetup();
         OpenButton.Click += (_, _) => Process.Start(new ProcessStartInfo("explorer.exe", "\"" + finished + "\"") { UseShellExecute = true });
@@ -529,6 +549,11 @@ sealed partial class Shell
         ReadValue(System.IO.Path.Combine(folder, "triforce_version.txt"), "version") ?? ReadValue(System.IO.Path.Combine(folder, "hookshot_version.txt"), "version");
 
     static bool HasGame => Install.Get("GameFolder") is { } g && GameExe(g) != null;
+    Button SetupBack = null!;   // (the build page's way back home)
+    CheckBox DlssTick = null!;   // (NVIDIA DLSS, its license accepted)
+    static bool DlssChosen => Install.Get("Dlss") == "1";
+    /// Where NVIDIA's DLSS SDK is kept: beside Setup, not in the tools folder (an update replaces that one whole)
+    static string NgxSdk => System.IO.Path.Combine(Install.InstalledDir ?? Install.SelfDir, "ngx-sdk");
 
     /// Play: the game starts when there is one (its settings are in its own options menu), else on to building one
     void AfterHome()
@@ -544,6 +569,8 @@ sealed partial class Shell
     {
         if (OutPath.Text.Length == 0)
             OutPath.Text = Install.Get("GameFolder") ?? System.IO.Path.Combine(Install.TestRoot ?? Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "Games", "Triforce");
+        SetupBack.Content = T(S.Back);
+        SetupBack.Visibility = HasGame ? Visibility.Visible : Visibility.Collapsed;   // (no game yet: nothing to go back to)
         Show(SetupPage);
         Banner();
         Refresh();
@@ -763,8 +790,11 @@ sealed partial class Shell
         SetButtons(cancel: true);
         elapsed.Restart();
         clock.Start();
+        // (NVIDIA DLSS chosen: its SDK fetched first, only what is missing, and built in; a build and an update alike)
+        var dlss = DlssChosen;
+        if (dlss && !args.Contains("--fetch-ngx-sdk")) args.AddRange(new[] { "--fetch-ngx-sdk", "--accept-nvidia-license" });
         Program.Log("build: make_game.py " + string.Join(" ", args) + " (tools " + tools.Root + ")");
-        runner = new Runner(tools, args);
+        runner = new Runner(tools, args, dlss ? NgxSdk : null);
         ShowClock();
         runner.Line += l => Ui(() => Line(l));
         runner.Finished += failure => Ui(() => Ended(failure));

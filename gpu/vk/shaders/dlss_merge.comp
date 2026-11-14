@@ -1,0 +1,21 @@
+#version 450
+// (local) The temporal upscaler before OoT's bloom and tone mapping, when it scaled up (vk_temporal.cpp temporal_pre_merged):
+// what the game drew into the scene's colour target after the engine drew there (the lens flare's sprites, after the bloom's
+// passes), carried into the engine's picture. The engine's picture went back into the scene scaled down, and the same
+// into `base`, a copy in the scene's own format; the scene now less that copy is what was drawn since, at the scene's size:
+// added to the engine's picture at the output's size, which the game's tone mapping then draws from. Nothing drawn since:
+// the two are the same texel for texel, and the picture is the engine's as it is.
+layout(local_size_x = 8, local_size_y = 8) in;
+layout(binding = 0) uniform sampler2D scene;    // (the scene's colour target now; linear filter)
+layout(binding = 1) uniform sampler2D base;     // (as the engine's pass left it; linear filter)
+layout(binding = 2) uniform sampler2D picture;  // (the engine's, at the output's size)
+layout(binding = 3, rgba16f) uniform writeonly image2D dst;
+layout(push_constant) uniform P { ivec2 size; } pc;
+void main() {
+    const ivec2 g = ivec2(gl_GlobalInvocationID.xy);
+    if (any(greaterThanEqual(g, pc.size))) return;
+    const vec2 uv = (vec2(g) + 0.5) / vec2(pc.size);
+    const vec3 since = textureLod(scene, uv, 0.0).rgb - textureLod(base, uv, 0.0).rgb;
+    const vec3 c = texelFetch(picture, g, 0).rgb + since;
+    imageStore(dst, g, vec4(min(max(c, vec3(0.0)), vec3(64000.0)), 1.0));
+}

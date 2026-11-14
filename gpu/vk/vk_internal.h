@@ -10,6 +10,7 @@
 
 #include "vk_loader.h"
 #include "vk_api.h"
+#include "vk_vendor.h"
 
 #if defined(_MSC_VER) && (defined(_M_X64) || defined(_M_IX86))
 #include <intrin.h>
@@ -69,6 +70,7 @@ struct Device {
     VkShaderStageFlags sg32_stages = 0;   // (stages that run at 32 lanes when asked: the size the translated programs assume)
     uint32_t subgroup_size = 32, subgroup_max = 32;   // (the lanes a stage not pinned runs at, and the most it can have)
     VkDriverId driver_id{};
+    VendorFixes fixes{};   // (hookshot) the vendor and driver workarounds this device needs (vk_vendor.h; vk_main.cpp create_device)
     uint32_t max_push_descriptors = 0;
     // no window (HOS_HEADLESS): presents go to an image of their own, which RX_VK_SHOTS can write out
     bool offscreen = false;
@@ -294,6 +296,10 @@ bool memory_mirror_bind_wait(VkSemaphoreSubmitInfo* wait);   // (and the wait a 
 bool memory_trial_on();
 void memory_trial_tick();
 void memory_trial_device_lost();
+void memory_trial_orderly_end();   // (the menu's Restart and Exit: no verdict for a session ended on purpose)
+/// (Triforce) Set while the start's own shader work runs (vk_main.cpp started_up): a fault in the driver then starts the game
+/// again (vk_draw.cpp driver_fault_restart, Windows)
+extern std::atomic<bool> startup_work_on;
 /// Device-local memory this process uses and what the driver allows it now (VK_EXT_memory_budget), summed over the
 /// device-local heaps; false when unknown
 bool vram_usage(uint64_t* used, uint64_t* budget, uint64_t* block_free = nullptr);
@@ -312,6 +318,8 @@ bool prepare_run(void (*progress)(size_t done, size_t total), bool background);
 bool prepare_is_update();
 void prepare_background();
 void state_list_run();                        // (an update: the state list's pipelines noted before precompile_run)
+void predict_background();   // (Triforce: the predicted pipelines predict_run did not get to, built behind the game)
+void predict_plan_ensure();  // (Triforce: its plan, made before the precompile when an older build prepared this install)
 void predict_run(void (*progress)(size_t done, size_t total));   // (after a prepare_run that prepared: the notes' predictions)
 /// (hookshot) The window was closed while the shaders were prepared: prepare_run and precompile_run take nothing more and return,
 /// what is done kept (the program cache, the driver's) and not counted as a start that ended inside them

@@ -43,7 +43,7 @@ DWORD WINAPI hos_out_of_memory_box(LPVOID unused) {
                 "Windows has run out of memory (RAM plus the page file), so Triforce may close.\n\n"
                 "Close other programs, and in Windows' System > About > Advanced system settings > Performance > Advanced > Virtual "
                 "memory, choose \"Automatically manage paging file size\" (or give it at least 16 GB). A lower Quality preset in the "
-                "Insert menu also uses less memory.",
+                "game's Options (the Graphics tab) also uses less memory.",
                 "Triforce: out of memory", MB_OK | MB_ICONWARNING | MB_TOPMOST);
     return 0;
 }

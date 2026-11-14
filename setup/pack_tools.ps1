@@ -18,13 +18,24 @@ foreach ($need in 'python\python.exe', 'cpm', 'wgpu-native') {
 if (-not (Test-Path (Join-Path $Deps 'llvm-mingw\bin\clang.exe')) -and -not $AllowNoCompiler) {
     throw "no llvm-mingw in ${Deps}: players' builds would need Visual Studio. (-AllowNoCompiler packs anyway, for tests)"
 }
+# (v0.3.5 shipped without them: no prompts folder was made on any player's PC and the Button prompts setting did nothing)
+$pins = Get-Content (Join-Path $repo 'nx2\prompt_requirements.txt') | ForEach-Object { ($_ -split '#')[0].Trim() } | Where-Object { $_ }
+foreach ($pin in $pins) {
+    $n, $v = $pin -split '=='
+    $info = Join-Path $Deps ('python\Lib\site-packages\{0}-{1}.dist-info' -f ($n -replace '-', '_'), $v)
+    if (-not (Test-Path $info)) { throw "the tools' Python in $Deps lacks $pin (nx2\prompt_requirements.txt): players would get no button prompts" }
+}
 $stage = Join-Path $Out 'stage'
 $tools = Join-Path $stage 'tools'
 if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 New-Item -ItemType Directory -Force $tools | Out-Null
 
 # 1. this checkout's sources (tracked files, working-tree versions)
-$files = git -C $repo ls-files -- nx2 host gpu scripts third_party LICENSE
+# (11-13: and assets/triforce.png. nx2/build.py makes the start-up screen's crest from it (nx2/logo_rgba.py), and a source
+# tree without the picture builds a screen with the wordmark alone: every pack up to v0.3.5 left the assets folder out, so
+# no player's game showed the crest while its shaders were prepared. Reported for AMD cards, where that screen stays longest)
+if (-not (Test-Path (Join-Path $repo 'assets\triforce.png') -PathType Leaf)) { throw 'assets\triforce.png is missing: the tools would build a game without the crest on its start-up screen' }
+$files = git -C $repo ls-files -- nx2 host gpu scripts third_party LICENSE assets/triforce.png
 foreach ($f in $files) {
     $src = Join-Path $repo $f
     if (-not (Test-Path $src -PathType Leaf)) { continue }

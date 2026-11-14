@@ -19,7 +19,17 @@ struct PipeNote {
     NvnState s;
 };
 /// (vk_predict.cpp) The pipelines the notes predict for the kept graphics program variants no note names (key 0: not made yet)
-std::vector<std::unique_ptr<PipeNote>> predict_pipelines(const std::vector<std::unique_ptr<PipeNote>>& notes, size_t* programs);
+/// (Triforce) A predicted pipeline as what it is made from: the program variant, the note whose vertex layout it takes and
+/// the note whose targets and state it takes. 32 bytes against a note's ~26 KB: the plan is kept in a file, and the notes
+/// are made again from it (predict_rebuild) when the programs' file can no longer be gone through whole (after the
+/// precompile took the noted programs out of its list)
+struct PredictPlan {
+    uint64_t prog, variant, vertex_note, output_note;
+};
+std::vector<std::unique_ptr<PipeNote>> predict_pipelines(const std::vector<std::unique_ptr<PipeNote>>& notes, size_t* programs,
+                                                         std::vector<PredictPlan>* plan = nullptr);
+std::vector<std::unique_ptr<PipeNote>> predict_rebuild(const std::vector<std::unique_ptr<PipeNote>>& notes,
+                                                       const std::vector<PredictPlan>& plan);
 }
 
 #include <functional>
@@ -83,6 +93,8 @@ uint64_t ub_generation();
 void ub_thread_off();
 /// The pipeline cache to disk (force: whatever was built since the last save; else only after a few new ones)
 void pipeline_cache_save(bool force);
+/// (vk_memory.cpp) The menu's Restart and Exit, before the window closes: no verdict on the memory trial for a session ended on purpose
+void memory_trial_orderly_end();
 
 /// The stream's uniform updates (UPDATE_UB, vk_replay.cpp) that overlap [addr, addr + n) and may not be in guest
 /// memory yet when the GPU reads it: a copy of the range with them applied, at the offset alloc returns in the

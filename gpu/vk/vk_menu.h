@@ -12,6 +12,18 @@ struct Options {
     int hdr = 0;          // (hookshot) HDR10 out (vk_framegen.cpp framegen_hdr): 0 off, 1 the SDR picture expanded, 2 the game's own (native) HDR; when the display has it (the swapchain made again at once)
     int hdr_white = 200;  // HDR paper white, nits (the picture's white)
     int hdr_peak = 1000;  // HDR peak brightness, nits (its brightest highlights)
+    // (Triforce, 11-13: both additions of the 11-13 patches are off until their row turns them on, read once at the start)
+    int renodx = 0;       // RenoDX HDR: 0 off, 1 RenoDX's shaders with HDR Native (host/nn_vi.c reads renodx_hdr= at the start)
+    int upscale_pre = 0;  // Upscale before bloom: 0 the Upscaler's engine on the finished picture, as before; 1 on the scene
+                          // before the game's bloom and tone mapping (vk_temporal.cpp pre_wanted)
+    // (local, RenoDX port: vk_renodx.cpp) with HDR Native, RenoDX's shaders in place of the game's tone mapping and HDR output
+    int rdx_tonemap = 1;      // 0 Vanilla (the game's curve), 1 PsychoV35
+    int rdx_midgray = 1;      // what PsychoV35 holds middle grey to: 0 the render's, 1 vanilla's, 2 the eye adaptation's
+    int rdx_ui_white = 200;   // the menus' and HUD's white, nits
+    int rdx_space = 1;        // the output's colour space: 0 Vanilla (the game's matrix), 1 BT.709, 2 DCI-P3
+    int rdx_exposure = 100;   // percent, 0 to 200
+    int rdx_highlights = 50, rdx_shadows = 50, rdx_contrast = 50, rdx_saturation = 50;   // 0 to 100, 50 neutral
+    int rdx_bloom = 50;       // 0 to 100, 50 the game's
     int fps_cap = 0;      // (hookshot) Frame rate cap: 0 60 (the console's), 90, 120, 144, 165, 240 (host/nn_vi.c reads frame_rate_cap= at the start)
     int resolution = 0;   // the 3D's (Render resolution): 0 Auto (the game's dynamic resolution), else a share of the output,
                           // 1..6 = 100%, 75%, 67%, 50%, 58%, 33% (upscaler_rows.h; nx2/oot_patches.py)
@@ -65,6 +77,14 @@ struct Options {
     int mic = 1;          // (hookshot) the ocarina's microphone: 0 Off, 1 the system's default, 2.. a device as host->mic_name lists it (host/nn_audio_in.c)
 };
 extern Options opts;
+/// (local, RenoDX port) opts.hdr as triforce_options.ini had it at the start (menu_init), before any change in play: what
+/// host/nn_vi.c hos_scene_rgba16f decided the scene's format from (vk_temporal.cpp temporal_scene_format)
+extern int hdr_at_start;
+/// (Triforce) opts.renodx and opts.upscale_pre as the file had them at the start: what this run does (RX_VK_RENODX and
+/// RX_VK_DLSS_PRE, 0 or 1, over them)
+extern int renodx_at_start, upscale_pre_at_start;
+/// Whether RenoDX's shaders run in this session: the RenoDX HDR row as it was at the start, or RX_VK_RENODX
+bool renodx_chosen();
 /// (vk_memory.cpp) true when the quality preset's memory budgets (vram_mb, mirror_mb) are to be used: the card has no more
 /// video memory than the preset is for. A 4GB preset on an 8 GB card kept 256 MB of mirrors and 2.2 GB of textures: the
 /// game's memory was read over PCIe and the textures made again every frame, 5 fps with the CPU idle (Discord, 11-08)

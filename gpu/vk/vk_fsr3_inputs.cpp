@@ -240,7 +240,7 @@ bool is_scene(const Texture* in) {
            in->height == s.cam.height;
 }
 
-bool prepare(VkCommandBuffer cmd, Texture* in, VkImageView in_view, Frame& out) {
+bool prepare(VkCommandBuffer cmd, Texture* in, VkImageView in_view, Frame& out, bool linear) {
     State& s = st();
     std::lock_guard lk(s.mu);
     free_dead();
@@ -287,7 +287,7 @@ bool prepare(VkCommandBuffer cmd, Texture* in, VkImageView in_view, Frame& out) 
     const bool motion = !reset && dlss_math::reprojection(cam.current, previous, pc.reproject);
     pc.jitter[0] = cam.jitter[0], pc.jitter[1] = cam.jitter[1];
     pc.size[0] = (int32_t)rw, pc.size[1] = (int32_t)rh;
-    pc.flags = (motion ? 1 : 0) | (camera.flip_depth ? 2 : 0);
+    pc.flags = (motion ? 1 : 0) | (camera.flip_depth ? 2 : 0) | (linear ? 4 : 0);
 
     full_barrier(cmd);   // (the scene's colour and depth, written before)
     {

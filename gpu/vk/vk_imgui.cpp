@@ -246,6 +246,27 @@ ImU32 hdr10_of(ImU32 c, float white) {
     return (c & IM_COL32_A_MASK) | code(0.6274f * r + 0.3293f * g + 0.0433f * b) << IM_COL32_R_SHIFT |
            code(0.0691f * r + 0.9195f * g + 0.0114f * b) << IM_COL32_G_SHIFT | code(0.0164f * r + 0.0880f * g + 0.8956f * b) << IM_COL32_B_SHIFT;
 }
+/// (Triforce, 11-13, the user: "Why is the [shader loading screen] so dark for me after turning hdr on?") A texture's texel
+/// for an HDR10 window image. The pipeline multiplies a texel by its vertex's colour, and hdr10 below codes every vertex
+/// colour, a picture's white tint too: white at the paper white is PQ code 0.65 at 400 nits (0.58 at 200), not 1. A texel
+/// coded the same way came out as code * 0.65: a white texel at 0.42, about 40 nits for 400, and darker the dimmer it was.
+/// Text and plain shapes were right (their texel is white coverage; the colour is the vertex's alone), every picture was ten
+/// times too dark: the start-up screen's crest and its stones, the logo, the plates of the options inside the game's own
+/// screen. So a texel is its HDR10 code over the code of white: times a white tint it is its own code again, exactly, and a
+/// white shape under a coloured tint is the tint's code, exactly (a coloured texel under a coloured tint is still a
+/// product of two codes: close, not exact; the exact way is the conversion in the fragment shader, not done)
+ImU32 hdr10_texel(ImU32 c, float white) {
+    static unsigned char over_white[256];
+    static float made_for = -1;
+    if (made_for != white) {
+        const float w = (float)(hdr10_of(IM_COL32_WHITE, white) >> IM_COL32_R_SHIFT & 0xFF);
+        for (int i = 0; i < 256; i++) over_white[i] = (unsigned char)std::clamp((int)(i * 255.0f / std::max(w, 1.0f) + 0.5f), 0, 255);
+        made_for = white;
+    }
+    const ImU32 v = hdr10_of(c, white);
+    return (v & IM_COL32_A_MASK) | (ImU32)over_white[v >> IM_COL32_R_SHIFT & 0xFF] << IM_COL32_R_SHIFT |
+           (ImU32)over_white[v >> IM_COL32_G_SHIFT & 0xFF] << IM_COL32_G_SHIFT | (ImU32)over_white[v >> IM_COL32_B_SHIFT & 0xFF] << IM_COL32_B_SHIFT;
+}
 void hdr10(ImDrawData* dd) {
     const float white = (float)std::clamp(opts.hdr_white, 80, 400);
     for (ImDrawList* list : dd->CmdLists)
@@ -273,7 +294,9 @@ void pixels(ImTextureData* tex, int x, int y, int w, int h, unsigned char* dst) 
             for (int i = 0; i < w; i++) {
                 ImU32 c;
                 memcpy(&c, src + i * 4, 4);
-                c = hdr10_of(c, white);
+                // (over white's code: see hdr10_texel. RX_VK_HDR_TEXEL_OLD=1, a lab switch: coded as a colour, as before)
+                static const bool as_before = getenv("RX_VK_HDR_TEXEL_OLD") != nullptr;
+                c = as_before ? hdr10_of(c, white) : hdr10_texel(c, white);
                 memcpy(dst + ((size_t)row * w + i) * 4, &c, 4);
             }
         } else if (tex->Format == ImTextureFormat_RGBA32) {   // (the glyphs: white, their coverage in alpha, the same in any space)

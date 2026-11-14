@@ -206,6 +206,21 @@ NGX_MSVC_RT = "vk_ngx_msvc_rt.cpp"
 FSR = os.environ.get("HOOKSHOT_FSR", "") == "1"
 
 
+def renodx_folder(folder):
+    """HOOKSHOT_RENODX as the build takes it: the folder when it has the compiled shaders, else "" (and why, said)"""
+    if folder and not os.path.isfile(os.path.join(folder, "renodx_spv.h")):
+        print("build: HOOKSHOT_RENODX=%s has no renodx_spv.h (scripts/renodx_shaders.py makes it): built without RenoDX"
+              % folder, flush=True)
+        return ""
+    return folder
+
+
+# HOOKSHOT_RENODX=<folder>: the Vulkan back end with RenoDX's HDR for OoT (gpu/vk/vk_renodx.cpp), from RenoDX's shaders fetched
+# and compiled into that folder's renodx_spv.h by scripts/renodx_shaders.py (never committed: they are worked from the game's
+# own shaders). Off without it (make_game.py --renodx does both); the host then keeps the game's own scene format (nn_vi.c)
+RENODX = renodx_folder(os.environ.get("HOOKSHOT_RENODX", ""))
+
+
 def ngx_link(sdk, mingw):
     """What triforce_vk.dll's link adds for NVIDIA DLSS on Windows: NVIDIA's library and the registry calls it makes; with
     llvm-mingw, not Microsoft's C++ runtime it names (libcpmt: vk_ngx_msvc_rt.cpp has what it needs of it, and the other
@@ -823,7 +838,9 @@ def main():
               host_fl + ["-I" + os.path.join(OPUS, "include")] +
               (["-I" + os.path.join(FFMPEG, "include")] if FFMPEG else []) +
               (FFMPEG_LX[0] if LINUX and FFMPEG_LX else []) +
-              ([stamp_def] if os.path.basename(s) == "hos_main.c" else []), host_deps) for s in host_srcs]
+              ([stamp_def] if os.path.basename(s) == "hos_main.c" else []) +
+              # (RenoDX's HDR in this build: the scene's colour target is RGBA16F with HDR Native, hos_scene_rgba16f)
+              (["-DHOOKSHOT_RENODX"] if RENODX and os.path.basename(s) == "nn_vi.c" else []), host_deps) for s in host_srcs]
     # libopus 1.5.2 (third_party/opus, from TOTKPort): nn::codec's hardware Opus decoder (host/nn_codec.c)
     # (hookshot: built for the same CPU target as the rest (CPU), so its float code can be vectorized where the target has
     # AVX2: the vendored copy has no x86 intrinsics files of its own)
@@ -913,6 +930,12 @@ def main():
         fsr_flags = ["-DHOOKSHOT_FSR", "-I" + os.path.join(kit.HERE, "..", "third_party", "fidelityfx")] if FSR else []
         if FSR:
             print("the Vulkan back end: with AMD FSR 4 (AMD's FSR API headers, third_party/fidelityfx)", flush=True)
+        # (RenoDX's HDR, a build's option too: only vk_renodx.cpp sees its compiled shaders; without them it is the stubs
+        # that replace nothing)
+        renodx_flags = ["-DHOOKSHOT_RENODX", "-I" + RENODX] if RENODX else []
+        renodx_deps = open(os.path.join(RENODX, "renodx_spv.h"), "rb").read() if RENODX else b""
+        if RENODX:
+            print("the Vulkan back end: with RenoDX's HDR (its shaders compiled in %s)" % RENODX, flush=True)
         # (Eden's recompiler and sirit see only their own headers: a change to the back end's vk_*.h does not
         # rebuild their ~500 files; the back end itself depends on everything, suyu's texture decoders included)
         vk_lib_deps = tree_headers(os.path.join(vk, "eden"), os.path.join(vk, "sirit"), os.path.join(vk, "compat"),
@@ -952,8 +975,10 @@ def main():
                             ([stamp_def] if os.path.basename(src) == "vk_menu.cpp" else []) +
                             (ngx_flags if os.path.basename(src) == "vk_dlss.cpp" else []) +
                             (imgui_flags if os.path.basename(src) in imgui_users else []) +
-                            (fsr_flags if os.path.basename(src) == "vk_fsr4.cpp" else []),
+                            (fsr_flags if os.path.basename(src) == "vk_fsr4.cpp" else []) +
+                            (renodx_flags if os.path.basename(src) == "vk_renodx.cpp" else []),
                             vk_lib_deps if lib else vdeps + (logo_text if os.path.basename(src) == "vk_imgui.cpp" else b"") +
+                            (renodx_deps if os.path.basename(src) == "vk_renodx.cpp" else b"") +
                             (ngx_deps if os.path.basename(src) == "vk_dlss.cpp" else b"") +
                             (imgui_deps if os.path.basename(src) in imgui_users else b"")))
         if NGX_SDK and not LINUX and toolchain.mingw():

@@ -4,6 +4,9 @@
 // SPDX-FileCopyrightText: Copyright 2021 yuzu Emulator Project
 // SPDX-License-Identifier: GPL-2.0-or-later
 
+#include <utility>
+#include <vector>
+
 #include "shader_recompiler/backend/spirv/emit_spirv.h"
 #include "shader_recompiler/backend/spirv/emit_spirv_instructions.h"
 #include "shader_recompiler/backend/spirv/spirv_emit_context.h"
@@ -18,6 +21,74 @@ void ConvertDepthMode(EmitContext& ctx) {
     const Id screen_depth{ctx.OpFMul(type, ctx.OpFAdd(type, z, w), ctx.Constant(type, 0.5f))};
     const Id vector{ctx.OpCompositeInsert(ctx.F32[4], screen_depth, position, 2u)};
     ctx.OpStore(ctx.output_position, vector);
+}
+
+/// Output variable and the unscaled value it held before ScaleNoPerspectiveOutputs.
+using ScaledOutputs = std::vector<std::pair<Id, Id>>;
+
+/// Write screen-linear generic outputs times Position.w (see RuntimeInfo::noperspective_outputs).
+/// Returns the unscaled values so a geometry shader can restore them after EmitVertex.
+ScaledOutputs ScaleNoPerspectiveOutputs(EmitContext& ctx) {
+    ScaledOutputs saved;
+    if (ctx.runtime_info.noperspective_outputs.none() || !Sirit::ValidId(ctx.output_position)) {
+        return saved;
+    }
+    const Id position{ctx.OpLoad(ctx.F32[4], ctx.output_position)};
+    const Id w{ctx.OpCompositeExtract(ctx.F32[1], position, 3u)};
+    for (size_t index = 0; index < ctx.output_generics.size(); ++index) {
+        if (!ctx.runtime_info.noperspective_outputs.test(index)) {
+            continue;
+        }
+        Id last{};
+        for (const GenericElementInfo& element : ctx.output_generics[index]) {
+            if (!Sirit::ValidId(element.id) || element.id.value == last.value ||
+                element.num_components == 0) {
+                continue;
+            }
+            last = element.id;
+            const Id type{ctx.F32[element.num_components]};
+            const Id value{ctx.OpLoad(type, element.id)};
+            const Id scaled{element.num_components == 1 ? ctx.OpFMul(type, value, w)
+                                                        : ctx.OpVectorTimesScalar(type, value, w)};
+            ctx.OpStore(element.id, scaled);
+            saved.emplace_back(element.id, value);
+        }
+    }
+    return saved;
+}
+
+/// A geometry shader keeps its outputs between EmitVertex calls: restore the unscaled values.
+void RestoreNoPerspectiveOutputs(EmitContext& ctx, const ScaledOutputs& saved) {
+    for (const auto& [id, value] : saved) {
+        ctx.OpStore(id, value);
+    }
+}
+
+/// (hookshot) RuntimeInfo::capture_position: the position as the stage leaves it, stored at the pushed address's slot for
+/// this vertex (CAPTURE_PUSH_OFFSET), when the address is not 0 and the slot below the pushed count. What is drawn is not
+/// changed: the store is the stage's last act, and reads only what it wrote
+void CapturePosition(EmitContext& ctx) {
+    const auto push = [&](Id type, u32 member) {
+        const Id pointer{ctx.TypePointer(spv::StorageClass::PushConstant, type)};
+        return ctx.OpLoad(type, ctx.OpAccessChain(pointer, ctx.rescaling_push_constants, ctx.Const(member)));
+    };
+    const Id address{push(ctx.U64, ctx.capture_address_member_index)};
+    const Id first{push(ctx.U32[1], ctx.capture_first_member_index)};
+    const Id count{push(ctx.U32[1], ctx.capture_count_member_index)};
+    const Id slot{ctx.OpISub(ctx.U32[1], ctx.OpLoad(ctx.U32[1], ctx.capture_vertex_index), first)};
+    const Id zero{ctx.Constant(ctx.U64, u64{0})};
+    const Id wanted{ctx.OpLogicalAnd(ctx.U1, ctx.OpINotEqual(ctx.U1, address, zero), ctx.OpULessThan(ctx.U1, slot, count))};
+    const Id store_label{ctx.OpLabel()};
+    const Id end_label{ctx.OpLabel()};
+    ctx.OpSelectionMerge(end_label, spv::SelectionControlMask::MaskNone);
+    ctx.OpBranchConditional(wanted, store_label, end_label);
+    ctx.AddLabel(store_label);
+    const Id offset{ctx.OpIMul(ctx.U64, ctx.OpUConvert(ctx.U64, slot), ctx.Constant(ctx.U64, u64{16}))};
+    const Id at{ctx.OpIAdd(ctx.U64, address, offset)};
+    const Id position{ctx.OpLoad(ctx.F32[4], ctx.output_position)};
+    ctx.OpStore(ctx.OpConvertUToPtr(ctx.capture_pointer, at), position, spv::MemoryAccessMask::Aligned, 16U);
+    ctx.OpBranch(end_label);
+    ctx.AddLabel(end_label);
 }
 
 void SetFixedPipelinePointSize(EmitContext& ctx) {
@@ -151,6 +222,12 @@ void EmitEpilogue(EmitContext& ctx) {
         !ctx.profile.support_native_ndc) {
         ConvertDepthMode(ctx);
     }
+    if (ctx.stage == Stage::VertexB || ctx.stage == Stage::TessellationEval) {
+        ScaleNoPerspectiveOutputs(ctx);
+    }
+    if (ctx.stage == Stage::VertexB && ctx.wants_capture) {   // (after the depth's conversion: the position as drawn)
+        CapturePosition(ctx);
+    }
     if (ctx.stage == Stage::Fragment) {
         AlphaTest(ctx);
     }
@@ -160,6 +237,7 @@ void EmitEmitVertex(EmitContext& ctx, const IR::Value& stream) {
     if (ctx.runtime_info.convert_depth_mode && !ctx.profile.support_native_ndc) {
         ConvertDepthMode(ctx);
     }
+    const ScaledOutputs scaled{ScaleNoPerspectiveOutputs(ctx)};
     if (!ctx.profile.support_geometry_streams) {
         throw NotImplementedException("Geometry streams");
     } else if (stream.IsImmediate()) {
@@ -170,6 +248,7 @@ void EmitEmitVertex(EmitContext& ctx, const IR::Value& stream) {
     }
     // Restore fixed pipeline point size after emitting the vertex
     SetFixedPipelinePointSize(ctx);
+    RestoreNoPerspectiveOutputs(ctx, scaled);
 }
 
 void EmitEndPrimitive(EmitContext& ctx, const IR::Value& stream) {

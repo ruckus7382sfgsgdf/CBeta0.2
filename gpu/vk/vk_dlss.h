@@ -15,7 +15,7 @@ struct TemporalEngine;
 bool dlss_built();
 /// Why DLSS cannot be chosen here (the Insert menu's Upscaler row says it), DLSS_OK when it can or is not known yet
 enum DlssWhy { DLSS_OK, DLSS_NOT_BUILT, DLSS_ENV_OFF, DLSS_NEEDS_RTX, DLSS_NEEDS_DRIVER, DLSS_NO_RUNTIME,
-               DLSS_RUNTIME_NOT_ASCII, DLSS_WHY_COUNT };
+               DLSS_RUNTIME_NOT_ASCII, DLSS_NGX_FAILED, DLSS_WHY_COUNT };
 DlssWhy dlss_why();
 /// Asks NGX once whether DLSS runs on this device, so dlss_why knows before the first upscale (the menu, when it opens).
 /// Nothing off an NVIDIA device with NGX's extensions, or in a build without DLSS

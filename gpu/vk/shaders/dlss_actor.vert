@@ -19,14 +19,15 @@ layout(push_constant) uniform P {
     uint stride;    // (in words)
     uint count;     // (vertices in the stream: an index past them draws nothing)
     uint first;
-    uint itype;     // (0: 8-bit, 1: 16-bit, 2: 32-bit indices)
+    uint itype;     // (0: 8-bit, 1: 16-bit, 2: 32-bit indices; 3: none, vertex i is base_vertex + i)
     int base_vertex;
     uint pos, sets;          // (byte offsets in a vertex, the joint and weight sets: 1 or 2)
     uint joints[2], weights[2];
-    uint formats;            // (1: the position RGBA16F, else RGB32F; 2 << set: that set's joints RGBA8UI, else RGBA16UI)
+    uint formats;            // (dlss_actor.h: 1 the position RGBA16F; 2 << set that set's joints 8-bit; its count at 4 + 2 * set; 256 rigid)
     uint tolerance;          // (the fragment stage's)
 } pc;
 layout(location = 0) out vec4 before;
+layout(location = 1) flat out vec2 jitter;   // (this frame's, of the camera the draw was drawn with: the scene's here)
 
 float f(uint i) { return uintBitsToFloat(data.w[i]); }
 vec4 f4(uint i) { return vec4(f(i), f(i + 1), f(i + 2), f(i + 3)); }
@@ -34,20 +35,23 @@ mat4 camera(uint at) {   // (row major in the buffer)
     return transpose(mat4(f4(at), f4(at + 4), f4(at + 8), f4(at + 12)));
 }
 vec4 row(Words m, uint i) { return uintBitsToFloat(uvec4(m.w[i], m.w[i + 1u], m.w[i + 2u], m.w[i + 3u])); }
-void skin(Words palette, uvec4 j, vec4 wt, vec4 p, inout vec3 acc) {
-    for (int k = 0; k < 4; k++) {
-        if (wt[k] <= 0.0 || j[k] >= pc.nbones) continue;
-        const uint b = j[k] * 12u;
-        acc += wt[k] * vec3(dot(row(palette, b), p), dot(row(palette, b + 4u), p), dot(row(palette, b + 8u), p));
-    }
+vec3 skinned(Words palette, uint j, vec4 p) {
+    const uint b = j * 12u;
+    return vec3(dot(row(palette, b), p), dot(row(palette, b + 4u), p), dot(row(palette, b + 8u), p));
+}
+uint byte_at(Words v, uint o) { return (v.w[o >> 2] >> ((o & 3u) * 8u)) & 0xffu; }
+uint set_count(uint s) {   // (dlss_actor.h set_count)
+    const uint c = (pc.formats >> (4u + 2u * s)) & 3u;
+    return c == 0u ? 4u : c == 1u ? 1u : c == 2u ? 2u : 0u;
 }
 void main() {
+    jitter = vec2(f(32u), f(33u));
     const uint at = pc.first + uint(gl_VertexIndex);
-    Words ib = Words(pc.indices);
     uint index;
-    if (pc.itype == 2u) index = ib.w[at];
-    else if (pc.itype == 1u) index = (ib.w[at >> 1] >> ((at & 1u) * 16u)) & 0xffffu;
-    else index = (ib.w[at >> 2] >> ((at & 3u) * 8u)) & 0xffu;
+    if (pc.itype == 3u) index = at;   // (a plain vertex array)
+    else if (pc.itype == 2u) index = Words(pc.indices).w[at];
+    else if (pc.itype == 1u) index = (Words(pc.indices).w[at >> 1] >> ((at & 1u) * 16u)) & 0xffffu;
+    else index = (Words(pc.indices).w[at >> 2] >> ((at & 3u) * 8u)) & 0xffu;
     const int vi = pc.base_vertex + int(index);
     if (vi < 0 || uint(vi) >= pc.count) {   // (outside the stream: nothing, its triangle dropped)
         gl_Position = vec4(0.0, 0.0, 0.0, -1.0);
@@ -60,17 +64,33 @@ void main() {
                                            : vec4(uintBitsToFloat(vb.w[q]), uintBitsToFloat(vb.w[q + 1u]),
                                                   uintBitsToFloat(vb.w[q + 2u]), 1.0);
     vec3 now = vec3(0.0), then = vec3(0.0);
+    // (each set: 1, 2 or 4 joints, 8- or 16-bit, and as many 8-bit weights, read byte by byte; rigid: one joint, all of it)
     for (uint s = 0u; s < pc.sets; s++) {
-        const uint a = vb.w[pc.joints[s] / 4u];
-        const uvec4 j = (pc.formats & (2u << s)) != 0u ? (uvec4(a, a >> 8, a >> 16, a >> 24) & 0xffu)
-                                                      : uvec4(a & 0xffffu, a >> 16, vb.w[pc.joints[s] / 4u + 1u] & 0xffffu,
-                                                              vb.w[pc.joints[s] / 4u + 1u] >> 16);
-        const vec4 wt = unpackUnorm4x8(vb.w[pc.weights[s] / 4u]);
-        skin(Words(pc.bones[0]), j, wt, p, now);
-        skin(Words(pc.bones[1]), j, wt, p, then);
+        const bool bytes = (pc.formats & (2u << s)) != 0u;
+        const uint n = set_count(s);
+        for (uint k = 0u; k < n; k++) {
+            const uint jo = pc.joints[s] + (bytes ? k : 2u * k);
+            const uint j = bytes ? byte_at(vb, jo) : byte_at(vb, jo) | (byte_at(vb, jo + 1u) << 8);
+            const float wt = (pc.formats & 256u) != 0u ? 1.0 : float(byte_at(vb, pc.weights[s] + k)) / 255.0;
+            if (wt <= 0.0 || j >= pc.nbones) continue;
+            now += wt * skinned(Words(pc.bones[0]), j, p);
+            then += wt * skinned(Words(pc.bones[1]), j, p);
+        }
     }
     const vec3 o0 = row(Words(pc.origins[0]), 0u).xyz, o1 = row(Words(pc.origins[1]), 0u).xyz;
-    const vec4 clip = camera(0u) * vec4(now + o0, 1.0);
+    // (this frame's position as the game's shaders make it: the origin and the skinned offset through the view apart, never
+    // added in the world's large numbers, then the projection. Through the one view-projection, the depth was off by more than
+    // the fragment stage's tolerance, and most of a character was left with the camera's motion)
+    // (the view and projection the draw itself was drawn with, in its pose: dlss_actor.h kPoseHead)
+    Words posed = Words(pc.origins[0]);
+    precise vec3 eye;
+    for (uint r = 0u; r < 3u; r++) {
+        const vec4 v = row(posed, 4u + 4u * r);
+        precise float at = dot(v.xyz, o0) + v.w;
+        eye[r] = at + dot(v.xyz, now);
+    }
+    precise vec4 clip;
+    for (uint r = 0u; r < 4u; r++) clip[r] = dot(row(posed, 16u + 4u * r), vec4(eye, 1.0));
     before = camera(16u) * vec4(then + o1, 1.0);
     // (the game's clip space: y up, depth -1 to 1; Vulkan's: y down, depth 0 to 1)
     gl_Position = vec4(clip.x, -clip.y, (clip.z + clip.w) * 0.5, clip.w);

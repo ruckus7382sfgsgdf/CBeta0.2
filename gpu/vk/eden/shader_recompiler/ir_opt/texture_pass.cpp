@@ -5,6 +5,9 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 
 #include <algorithm>
+#include <atomic>   // (EDEN_IR_PRE below. The players' compiler has libc++, which does not bring it in by itself)
+#include <cstdio>
+#include <cstdlib>
 #include <queue>
 #include <unordered_map>
 #include <unordered_set>
@@ -248,10 +251,16 @@ bool IsStorageImageOpcode(IR::Opcode opcode) {
 
 u32 DynamicSampledTextureArrayCount(const TextureInstVector& to_replace) {
     u32 count{};
+    // (hookshot) the samples of one handle table share one descriptor: counted once (the water's 69 shadow samples of
+    // one table cut its share of the budget to 14 elements)
+    std::unordered_set<u32> tables;
     for (const TextureInst& inst : to_replace) {
         const auto flags{inst.inst->Flags<IR::TextureInstInfo>()};
         if (inst.cbuf.count > 1 && !IsStorageImageOpcode(IndexedInstruction(*inst.inst)) &&
             flags.type != TextureType::Buffer) {
+            if (inst.cbuf.handle_program != ~0U && !tables.insert(inst.cbuf.handle_program).second) {
+                continue;
+            }
             ++count;
         }
     }
@@ -451,6 +460,13 @@ bool IsUndefined(IR::Opcode opcode) {
 thread_local std::unordered_map<const IR::Inst*, u32> g_handle_slots;
 thread_local u32 g_handle_slot_count{};
 thread_local int g_handle_depth{};
+// (hookshot) A handle table read in a loop (a light's shadow map, the light's index from a per-pixel list): the
+// element index, built as HandleOp::Index wherever the handle reads it
+thread_local const IR::Inst* g_index_operand{};
+// (hookshot) The handles no handle program followed in this translation, and where they stopped (TakeHandleFallbacks)
+thread_local u32 g_fallbacks{};
+thread_local u32 g_tables{};   // (Triforce: the handles given a table in this translation, TakeHandleTables)
+thread_local std::string g_fallback_ops;
 
 bool BuildHandleNode(const IR::Value& value, std::vector<u32>& code, int& budget,
                      const IR::Block* block);
@@ -524,6 +540,10 @@ bool BuildHandleNode(const IR::Value& value, std::vector<u32>& code, int& budget
         return true;
     }
     const IR::Inst* const inst{value.InstRecursive()};
+    if (inst == g_index_operand) {
+        emit(Op::Index);
+        return true;
+    }
     const auto build = [&](size_t arg) { return BuildHandleProgram(inst->Arg(arg), code, budget, block); };
     const auto binary = [&](Op op) {
         if (!build(0) || !build(1)) return false;
@@ -587,7 +607,8 @@ bool BuildHandleNode(const IR::Value& value, std::vector<u32>& code, int& budget
     case IR::Opcode::GetCbufU32:
     case IR::Opcode::LoadStorage32:
         return load_word(inst, 0);
-    case IR::Opcode::CompositeExtractU32x2: {
+    case IR::Opcode::CompositeExtractU32x2:
+    case IR::Opcode::CompositeExtractU32x4: {
         const IR::Value element{inst->Arg(1)};
         if (!element.IsImmediate() || inst->Arg(0).IsImmediate()) return false;
         return load_word(inst->Arg(0).InstRecursive(), element.U32() * 4);
@@ -930,10 +951,140 @@ std::optional<ConstBufferAddr> TryGetConstBuffer(const IR::Inst* inst, Environme
     };
 }
 
+IR::Value SkipIdentity(IR::Value v) {
+    for (int i = 0; i < 16 && !v.IsImmediate() && v.InstRecursive()->GetOpcode() == IR::Opcode::Identity; ++i) {
+        v = v.InstRecursive()->Arg(0);
+    }
+    return v;
+}
+
+// The value a 16-bit half extract reads (BitFieldUExtract x, 0, 16: the low half of an XMAD pair's index), else itself
+IR::Value IndexThroughLowHalf(IR::Value v) {
+    v = SkipIdentity(v);
+    if (v.IsImmediate()) return v;
+    const IR::Inst* const i{v.InstRecursive()};
+    if (i->GetOpcode() == IR::Opcode::BitFieldUExtract) {
+        const IR::Value offset{SkipIdentity(i->Arg(1))};
+        const IR::Value count{SkipIdentity(i->Arg(2))};
+        if (offset.IsImmediate() && count.IsImmediate() && offset.U32() == 0 && count.U32() == 16) {
+            return SkipIdentity(i->Arg(0));
+        }
+    }
+    return v;
+}
+
+// (hookshot) The handle is a word of a storage buffer record whose address adds index * stride, a table of records:
+// Ocarina of Time's water and wet floors read each light's shadow map handle from the light's record, for the lights
+// of the pixel's cluster. The index (in *index) when the handle is read so: a multiply by a stride of 4..4096 bytes (or
+// an XMAD pair's halves of one) or a shift by 2..12, in the sums that make the record's address.
+bool FindHandleTableIndex(const IR::Value& handle, IR::Value& index) {
+    const IR::Value v{SkipIdentity(handle)};
+    if (v.IsImmediate()) return false;
+    const IR::Inst* load{v.InstRecursive()};
+    if (load->GetOpcode() == IR::Opcode::CompositeExtractU32x2 ||
+        load->GetOpcode() == IR::Opcode::CompositeExtractU32x4) {
+        const IR::Value src{SkipIdentity(load->Arg(0))};
+        if (src.IsImmediate()) return false;
+        load = src.InstRecursive();
+    }
+    switch (load->GetOpcode()) {
+    case IR::Opcode::LoadStorage32:
+    case IR::Opcode::LoadStorage64:
+    case IR::Opcode::LoadStorage128:
+        break;
+    default:
+        return false;
+    }
+    // Through the sums that make the record's address only
+    std::vector<IR::Value> work{load->Arg(1)};
+    for (int steps = 0; !work.empty() && steps < 64; ++steps) {
+        const IR::Value cur{SkipIdentity(work.back())};
+        work.pop_back();
+        if (cur.IsImmediate()) continue;
+        const IR::Inst* const i{cur.InstRecursive()};
+        switch (i->GetOpcode()) {
+        case IR::Opcode::IAdd32:
+        case IR::Opcode::ISub32:
+            work.push_back(i->Arg(0));
+            work.push_back(i->Arg(1));
+            break;
+        case IR::Opcode::IMul32:
+            for (size_t a = 0; a < 2; ++a) {
+                const IR::Value k{SkipIdentity(i->Arg(a))};
+                const IR::Value x{IndexThroughLowHalf(i->Arg(1 - a))};
+                if (k.IsImmediate() && k.U32() >= 4 && k.U32() <= 4096 && !x.IsImmediate()) {
+                    index = x;
+                    return true;
+                }
+            }
+            break;
+        case IR::Opcode::ShiftLeftLogical32: {
+            const IR::Value k{SkipIdentity(i->Arg(1))};
+            const IR::Value x{SkipIdentity(i->Arg(0))};
+            if (k.IsImmediate() && k.U32() >= 2 && k.U32() <= 12 && !x.IsImmediate()) {
+                index = x;
+                return true;
+            }
+            break;
+        }
+        default:
+            break;
+        }
+    }
+    return false;
+}
+
+// (Triforce, 11-13) The handle behind the merges of a register. Ocarina of Time's wet floors and water filter each
+// projector's shadow map in one of several ways, picked by a jump table; the 9- and the 16-sample filters come after the
+// others, and their handle is a Phi of the record's handle word (the one value, on every path that leads to them) and of
+// an earlier filter's RESULT, which the same register held on a path that does not lead to them. The search for the
+// handle's constant buffer word went into that result's sample, down to its coordinates, and took the first constant it
+// met there for the handle: a float, 0.001, no texture. Every one of those 25 samples then read the stand-in texture,
+// "in shadow", and the projector's whole cluster tiles lost their local lights: the dark squares on wet floors (upstream
+// issue 2509; its pull request 3047 gives the handle's table to the 44 samples that read the record directly, and
+// these 25 stayed as they were). A texture sample's result is never a handle: such inputs are left out, and when what is
+// left is one and the same value, that value is the handle. Anything else is returned as it is.
+// EDEN_HANDLE_PHI=0: as before
+IR::Value ResolveHandlePhi(const IR::Value& handle) {
+    static const char* const off_env{std::getenv("EDEN_HANDLE_PHI")};
+    if (off_env && off_env[0] == '0') return handle;
+    const IR::Value start{SkipIdentity(handle)};
+    if (start.IsImmediate() || start.InstRecursive()->GetOpcode() != IR::Opcode::Phi) return handle;
+    std::vector<IR::Value> work{start};
+    std::unordered_set<const IR::Inst*> seen;
+    const IR::Inst* found{};
+    IR::Value found_value;
+    for (int steps = 0; !work.empty(); ++steps) {
+        if (steps > 512) return handle;
+        const IR::Value cur{SkipIdentity(work.back())};
+        work.pop_back();
+        if (cur.IsImmediate()) return handle;   // (a constant on a path: not this case)
+        const IR::Inst* const i{cur.InstRecursive()};
+        if (i->GetOpcode() == IR::Opcode::Phi) {
+            if (seen.insert(i).second) {
+                for (size_t a = 0; a < i->NumArgs(); ++a) work.push_back(i->Arg(a));
+            }
+            continue;
+        }
+        // (a sample's result, or its bits)
+        const IR::Inst* source{i};
+        if (source->GetOpcode() == IR::Opcode::BitCastU32F32) {
+            const IR::Value bits{SkipIdentity(source->Arg(0))};
+            if (!bits.IsImmediate()) source = bits.InstRecursive();
+        }
+        if (IsTextureInstruction(*source)) continue;
+        if (found && found != i) return handle;   // (two different values: a real choice, left to the search)
+        found = i;
+        found_value = cur;
+    }
+    return found ? found_value : handle;
+}
+
 TextureInst MakeInst(Environment& env, IR::Block* block, IR::Inst& inst, const HostTranslateInfo& host_info) {
     ConstBufferAddr addr;
     if (IsBindless(inst)) {
-        const std::optional<ConstBufferAddr> track_addr{TrackCached(inst.Arg(0), env, host_info, block)};
+        const IR::Value handle{ResolveHandlePhi(inst.Arg(0))};
+        const std::optional<ConstBufferAddr> track_addr{TrackCached(handle, env, host_info, block)};
 
         if (track_addr) {
             addr = *track_addr;
@@ -942,10 +1093,61 @@ TextureInst MakeInst(Environment& env, IR::Block* block, IR::Inst& inst, const H
             std::vector<u32> code;
             int budget = 4096;
             g_handle_failure = IR::Opcode::Void;
-            if (!g_handle_programs || !BuildHandleProgram(inst.Arg(0), code, budget, block)) {
+            if (!g_handle_programs || !BuildHandleProgram(handle, code, budget, block)) {
+                // (hookshot) A table read in a loop: one texture for each element, picked in the shader by the
+                // element's index (RX_VK_HANDLE_TABLE=0: the search below, one texture for all of them)
+                static const char* const table_env = std::getenv("RX_VK_HANDLE_TABLE");
+                static const bool table_on = !(table_env && table_env[0] == '0');
+                static const u32 table_count = [] {
+                    const char* const c = std::getenv("RX_VK_HANDLE_TABLE_COUNT");
+                    const long n = c ? std::strtol(c, nullptr, 0) : 64;
+                    return static_cast<u32>(std::clamp<long>(n, 2, 256));
+                }();
+                IR::Value index_value;
+                if (table_on && g_handle_programs && FindHandleTableIndex(handle, index_value)) {
+                    code.clear();
+                    budget = 4096;
+                    g_index_operand = index_value.InstRecursive();
+                    const bool built = BuildHandleProgram(handle, code, budget, block);
+                    g_index_operand = nullptr;
+                    if (built) {
+                        ++g_tables;
+                        auto& programs{*g_handle_programs};
+                        auto it{std::ranges::find(programs, code)};
+                        if (it == programs.end()) {
+                            programs.push_back(std::move(code));
+                            it = programs.end() - 1;
+                        }
+                        // The element's index as a descriptor offset (the array reads it back: offset >> 3)
+                        IR::IREmitter ir{*block, IR::Block::InstructionList::s_iterator_to(inst)};
+                        const IR::U32 offset{ir.ShiftLeftLogical(IR::U32{index_value}, ir.Imm32(DESCRIPTOR_SIZE_SHIFT))};
+                        return TextureInst{
+                            .cbuf = ConstBufferAddr{
+                                .index = 0,
+                                .offset = 0,
+                                .shift_left = 0,
+                                .secondary_index = 0,
+                                .secondary_offset = 0,
+                                .secondary_shift_left = 0,
+                                .dynamic_offset = offset,
+                                .count = table_count,
+                                .has_secondary = false,
+                                .handle_program = static_cast<u32>(it - programs.begin()),
+                            },
+                            .inst = &inst,
+                            .block = block,
+                        };
+                    }
+                    code.clear();
+                    budget = 4096;
+                }
+                ++g_fallbacks;
+                if (g_fallback_ops.size() < 200) {
+                    g_fallback_ops += fmt::format("{}{}", g_fallback_ops.empty() ? "" : ", ", g_handle_failure);
+                }
                 // Not computable for a whole draw (a handle that changes in a loop): keep the
                 // earlier search through loads, which at least gives the shader a texture.
-                const std::optional<ConstBufferAddr> legacy{IR::BreadthFirstSearch(inst.Arg(0),
+                const std::optional<ConstBufferAddr> legacy{IR::BreadthFirstSearch(handle,
                     [&env, &host_info, block](const IR::Inst* candidate) {
                         return TryGetConstBuffer(candidate, env, host_info, block);
                     }, [&](IR::Value operand) { return ResolveConditionalPhi(operand, block); })};
@@ -1167,7 +1369,39 @@ void PatchTexelFetch(IR::Block& block, IR::Inst& inst, TexturePixelFormat pixel_
 }
 } // Anonymous namespace
 
+u32 TakeHandleTables() {
+    const u32 n = g_tables;
+    g_tables = 0;
+    return n;
+}
+
+u32 TakeHandleFallbacks(std::string& stopped_at) {
+    const u32 n = g_fallbacks;
+    stopped_at = std::move(g_fallback_ops);
+    g_fallbacks = 0;
+    g_fallback_ops.clear();
+    return n;
+}
+
 void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo& host_info) {
+    // (lab, 11-13) EDEN_IR_PRE=<n>: the programs with n depth-compare samples whose handle is still to be found are
+    // written out as they come INTO this pass (ir_pre_<n>_<blocks>.txt beside the game): where a sample's handle comes
+    // from can only be read there, this pass replaces it. An EDEN_ name: the shaders are translated again for it
+    if (static const char* const pre = std::getenv("EDEN_IR_PRE"); pre) {
+        size_t n = 0;
+        for (IR::Block* const b : program.blocks)
+            for (IR::Inst& i : b->Instructions()) n += i.GetOpcode() == IR::Opcode::BindlessImageSampleDrefImplicitLod;
+        static std::atomic<int> written{0};   // (at least n of them; the first twelve programs)
+        if (n && n >= static_cast<size_t>(std::atoi(pre)) && written++ < 12) {
+            char name[64];
+            std::snprintf(name, sizeof name, "ir_pre_%zu_%zu.txt", n, program.blocks.size());
+            if (FILE* const f = std::fopen(name, "w")) {
+                const std::string text{IR::DumpProgram(program)};
+                std::fwrite(text.data(), 1, text.size(), f);
+                std::fclose(f);
+            }
+        }
+    }
     // reset per-pass caches
     env.cbuf_word_cache.clear();
     env.handle_cache.clear();

@@ -39,6 +39,9 @@ static const char *fixture_env(const char *name) {
     return override;
 }
 #define getenv fixture_env
+/* (local, RenoDX port: host/nn_vi.c's, whether the scene's colour target is RGBA16F for the run) */
+static int scene_rgba16f;
+int hos_scene_rgba16f(void) { return scene_rgba16f; }
 ''' + body + r'''
 #define WIDE(w, h) ((uint64_t)(h) << 32 | (w))
 static const struct {
@@ -74,6 +77,13 @@ int main(void) {
             failed = 1;
         }
     }
+    /* (local, RenoDX port) an RGBA16F scene: 128 MiB more, but not over an explicit HOS_RT_POOL_MB */
+    scene_rgba16f = 1;
+    output_width = 2560; output_height = 1440; hos_wide_out = 0;
+    override = NULL;
+    if (hos_rt_pool_size(305 * MIB) != (512 + 128) * MIB) { fprintf(stderr, "RGBA16F scene: not 640 MiB\n"); failed = 1; }
+    override = "256";
+    if (hos_rt_pool_size(305 * MIB) != 256 * MIB) { fprintf(stderr, "RGBA16F scene: the override not kept\n"); failed = 1; }
     return failed;
 }
 '''
@@ -87,7 +97,8 @@ int main(void) {
         source.write_text(fixture)
         subprocess.run([compiler, "-std=c11", "-O2", str(source), "-o", str(binary)], check=True)
         subprocess.run([str(binary)], check=True, timeout=5)
-    print("PASS: 512 MiB floor, 4K/ultrawide growth and explicit overrides, the 5K output's 900 MiB (14 cases)")
+    print("PASS: 512 MiB floor, 4K/ultrawide growth and explicit overrides, the 5K output's 900 MiB (14 cases), "
+          "an RGBA16F scene's 128 MiB more")
 
 
 if __name__ == "__main__":

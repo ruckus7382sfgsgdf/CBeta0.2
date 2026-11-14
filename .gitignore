@@ -38,6 +38,9 @@ build-linux/
 # ---- NVIDIA's DLSS SDK (scripts/ngx_sdk.py): NVIDIA's files, never committed ----
 ngx-sdk/
 
+# ---- RenoDX's shaders compiled (scripts/renodx_shaders.py): worked from the game's own shaders, never committed ----
+renodx_spv.h
+
 # Triforce Setup's build output (setup\build.ps1, setup\pack_tools.ps1)
 setup/out/
 build1.done

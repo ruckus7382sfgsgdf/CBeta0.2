@@ -442,6 +442,22 @@ def patch_text_speed(s):
     return s.replace('#include "a64.h"\n', '#include "a64.h"\n' + TEXT_DECL, 1)
 
 
+# (local, RenoDX port) The scene's colour target, "agl::RenderDisplay(color)": the game picks engine format 26 (R11G11B10F) or 44
+# (RGBA16F) at main+0x65234c (0x8067234c; RenoDX's addon.cpp names the place for build e0f3ccfa). RenoDX's tone mapping wants
+# RGBA16F, whose values may be negative, with HDR Native: host/nn_vi.c hos_scene_rgba16f says when. The other choice of that
+# csel is 44 already, so both become 44 then; the UNORM branch at main+0x6525b0 is left alone.
+RGBA16F_DECL = "int hos_scene_rgba16f(void);\n"
+RGBA16F_OLD = ("    c->x[9] = 0x1aULL;\n    c->x[9] &= 0xFFFFFFFFULL;\n"
+               "    { uint64_t _r = (!c->z) ? c->x[10] : c->x[9]; _r &= 0xFFFFFFFFULL; c->x[9] = _r; }\nL_80672354:;")
+RGBA16F_NEW = RGBA16F_OLD.replace("c->x[9] = 0x1aULL;", "c->x[9] = hos_scene_rgba16f() ? 0x2cULL : 0x1aULL;", 1)
+
+
+def patch_scene_format(s):
+    if RGBA16F_OLD not in s:
+        return None
+    return s.replace(RGBA16F_OLD, RGBA16F_NEW, 1).replace('#include "a64.h"\n', '#include "a64.h"\n' + RGBA16F_DECL, 1)
+
+
 def apply(gen, *, protect_hearts=False, required=False):
     """required: the lift of the supported build (LIFE_BUILD_ID), whole: a missing output-size edit stops it (apply_output_size).
     The other patches only warn when their place is not found once."""
@@ -456,6 +472,7 @@ def apply(gen, *, protect_hearts=False, required=False):
         done["player flight rotation"] = 0
         done["free camera"] = 0
         done["mouse camera"] = 0
+        done["scene colour target format"] = 0   # (local, RenoDX port)
     step_sites, step_files = 0, []   # (the divides with the hook, and the files that have it)
     whole_sites = 0   # (the counters of WHOLE_SITES with the whole frames: patch_whole_frames)
     sound_jobs = solver_sites = 0   # (patch_sound_job, patch_solver_steps: the places found with their hooks)
@@ -494,6 +511,11 @@ def apply(gen, *, protect_hearts=False, required=False):
         if n:
             done["fixed path's scale"] += 1
             print("oot_patches: the fixed path's scale in", os.path.basename(path))
+        fmt = patch_scene_format(out) if protect_hearts else None
+        if fmt is not None:
+            out = fmt
+            done["scene colour target format"] += 1
+            print("oot_patches: the scene's colour target format in", os.path.basename(path))
         life = patch_life(out) if protect_hearts else None
         if life is not None:
             out = life

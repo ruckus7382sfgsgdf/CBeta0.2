@@ -564,7 +564,12 @@ VkImage framegen_scale(VkCommandBuffer cmd, VkImageView src, VkImage image, uint
         }
         drop_img(scale.scaled);
         scale.scaled_w = scale.scaled_h = 0;
-        if (!make_img(scale.scaled, dw, dh, VK_FORMAT_R8G8B8A8_UNORM, VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT)) {
+        // (Triforce, 11-13: SAMPLED too. On an HDR10 display the HDR pass (framegen_hdr) samples this image whenever the
+        // picture was scaled or sharpened first; made without that usage, sampling it is not allowed, and the window was
+        // black with Sharpness or Upscaling on ("Sharpness slider deletes all visuals", RTX 3060 Ti on an HDR10 surface;
+        // shown in the lab with RX_VK_TEST_HDR_PASS=1: the window's mean brightness 0 with Sharpness 70, 131 with 0))
+        if (!make_img(scale.scaled, dw, dh, VK_FORMAT_R8G8B8A8_UNORM,
+                      VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_SAMPLED_BIT)) {
             drop_img(scale.scaled);
             return VK_NULL_HANDLE;
         }

@@ -4,14 +4,29 @@
 // output's with the sampler's linear filter.
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(binding = 0) uniform sampler2D src;
+// (local, RenoDX port) -DHDR (dlss_out_hdr_comp_spv.h), for an RGBA16F scene: DLSS's picture is linear already (dlss_prep's
+// HDR colour), written as it is into the RGBA16F output.
+#ifdef HDR
+layout(binding = 1, rgba16f) uniform writeonly image2D dst;
+#else
 layout(binding = 1, r11f_g11f_b10f) uniform writeonly image2D dst;
-layout(push_constant) uniform P { ivec2 size; } pc;
+#endif
+// pc.linear (the upscaler before the game's bloom and tone mapping): 1, src is linear HDR light already, written as it is
+// into the scene's colour target (no square); 2, src is the tone mapped picture's square root, squared (either pass).
+layout(push_constant) uniform P { ivec2 size; int linear; } pc;
 void main() {
     const ivec2 g = ivec2(gl_GlobalInvocationID.xy);
     if (any(greaterThanEqual(g, pc.size))) return;
     vec3 c = all(equal(textureSize(src, 0), pc.size)) ? texelFetch(src, g, 0).rgb
                                                      : textureLod(src, (vec2(g) + 0.5) / vec2(pc.size), 0.0).rgb;
     c = max(c, vec3(0.0));
-    c *= c;
+    // (pc.linear: 0 the plain pass squares and -DHDR's writes as it is, as before; 1 as it is, kept inside what the
+    // target's format holds; 2 squared, either pass)
+    if (pc.linear == 1) c = min(c, vec3(64000.0));
+#ifdef HDR
+    else if (pc.linear == 2) c *= c;
+#else
+    else c *= c;
+#endif
     imageStore(dst, g, vec4(c, 1.0));
 }

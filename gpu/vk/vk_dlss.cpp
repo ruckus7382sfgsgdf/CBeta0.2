@@ -77,7 +77,12 @@ struct State {
     uint32_t feature_rw = 0, feature_rh = 0, feature_ow = 0, feature_oh = 0;   // (its largest render size, its output)
     uint32_t min_rw = 0, min_rh = 0;
     unsigned feature_preset = ~0u;   // (the preset it was made with: another one from the menu makes it again)
+    bool feature_hdr = false;        // (made for linear HDR colour, NGX's IsHDR: the other kind of colour makes it again)
     uint64_t features_made = 0;      // (how many times: a feature made again in play costs a stall, so each says why)
+    // (a feature not made for want of video memory: tried again from retry_frame on, kMemoryRetries times before it is given
+    // up for the run. Each try stalls as a creation does, so they are 600 frames apart)
+    uint64_t retry_frame = 0;
+    int retries = 0;
 };
 State& st() {
     static State s;
@@ -262,7 +267,13 @@ bool ngx_init() {
         g_why = needs_driver ? DLSS_NEEDS_DRIVER : !runtime ? DLSS_NO_RUNTIME : !loadable ? DLSS_RUNTIME_NOT_ASCII : DLSS_NEEDS_RTX;
         return false;
     }
-    if (NVSDK_NGX_FAILED(NVSDK_NGX_VULKAN_AllocateParameters(&s.params)) || !s.params) return false;
+    if (const NVSDK_NGX_Result ar = NVSDK_NGX_VULKAN_AllocateParameters(&s.params); NVSDK_NGX_FAILED(ar) || !s.params) {
+        // (a reason of its own: left unset, dlss_why went on saying DLSS could be chosen, with the engine off for the run)
+        logf("vk: NVIDIA DLSS: NGX gave no parameters (%#x): no DLSS", (unsigned)ar);
+        s.params = nullptr;
+        g_why = DLSS_NGX_FAILED;
+        return false;
+    }
     logf("vk: NVIDIA DLSS: NGX started (DLSS's runtime: the newest %s in %s)", kRuntime, where.c_str());
     s.ngx_ok = true;
     g_why = DLSS_OK;
@@ -277,13 +288,15 @@ unsigned wanted_preset() {
 
 /// DLSS's feature for this output size and preset, made when either changes (cmd: its creation's work): the engine's
 /// prepare (vk_temporal.h)
-int prepare(VkCommandBuffer cmd, uint32_t rw, uint32_t rh, uint32_t ow, uint32_t oh, uint32_t* in_w, uint32_t* in_h,
-            const char** fail) {
+int prepare(VkCommandBuffer cmd, uint32_t rw, uint32_t rh, uint32_t ow, uint32_t oh, bool hdr, uint32_t* in_w,
+            uint32_t* in_h, const char** fail) {
     State& s = st();
     const unsigned preset = wanted_preset();
     if (s.feature && s.feature_ow == ow && s.feature_oh == oh && rw <= s.feature_rw && rh <= s.feature_rh &&
-        rw >= s.min_rw && rh >= s.min_rh && s.feature_preset == preset)
+        rw >= s.min_rw && rh >= s.min_rh && s.feature_preset == preset && s.feature_hdr == hdr)
         return *in_w = s.feature_rw, *in_h = s.feature_rh, 1;
+    static const char* const kNoMemory = "no video memory for its feature: tried again in a while";
+    if (s.retry_frame && texture_frame_no() < s.retry_frame) return *fail = kNoMemory, 0;
     // (why it is made: in the log with its time, so a stall in play can be matched with one)
     char why[160];
     if (!s.feature && !s.features_made) snprintf(why, sizeof why, "the first");
@@ -293,6 +306,7 @@ int prepare(VkCommandBuffer cmd, uint32_t rw, uint32_t rh, uint32_t ow, uint32_t
     else if (s.feature_preset != preset)
         snprintf(why, sizeof why, "preset %c, was %c (the DLSS model row)", upscaler_rows::preset_letter(preset),
                  upscaler_rows::preset_letter(s.feature_preset));
+    else if (s.feature_hdr != hdr) snprintf(why, sizeof why, "the colour is %s now", hdr ? "HDR" : "LDR");
     else
         snprintf(why, sizeof why, "the render size %ux%u left its range, %ux%u to %ux%u", rw, rh, s.min_rw, s.min_rh,
                  s.feature_rw, s.feature_rh);
@@ -338,6 +352,9 @@ int prepare(VkCommandBuffer cmd, uint32_t rw, uint32_t rh, uint32_t ow, uint32_t
     cp.Feature.InPerfQualityValue = mode;
     // (LDR colour, already tonemapped: no exposure; motion at the render size, not jittered; depth not reversed)
     cp.InFeatureCreateFlags = NVSDK_NGX_DLSS_Feature_Flags_MVLowRes;
+    // (linear HDR colour, when the chain says so: the scene before the game's exposure and tone mapping, or an RGBA16F
+    // scene's picture (local, RenoDX port), so DLSS finds the exposure itself)
+    if (hdr) cp.InFeatureCreateFlags |= NVSDK_NGX_DLSS_Feature_Flags_IsHDR | NVSDK_NGX_DLSS_Feature_Flags_AutoExposure;
     const auto t0 = std::chrono::steady_clock::now();
     ::mkwvk::rec::boundary(::mkwvk::rec::B_DIRECT);   // (NGX records into cmd itself: what this thread recorded through vk_work.h reaches cmd first)
     const NVSDK_NGX_Result r = NGX_VULKAN_CREATE_DLSS_EXT(cmd, 1, 1, &s.feature, s.params, &cp);
@@ -346,10 +363,21 @@ int prepare(VkCommandBuffer cmd, uint32_t rw, uint32_t rh, uint32_t ow, uint32_t
     if (NVSDK_NGX_FAILED(r) || !s.feature) {
         logf("vk: NVIDIA DLSS: its feature was not made (%#x) for %ux%u -> %ux%u", (unsigned)r, max_w, max_h, ow, oh);
         s.feature = nullptr;
+        // (out of video memory passes, when the game lets an area's textures go: not the end of DLSS for the run, as any
+        // failure was before. Anything else is)
+        constexpr int kMemoryRetries = 3;
+        if (r == NVSDK_NGX_Result_FAIL_OutOfGPUMemory && s.retries < kMemoryRetries) {
+            s.retries++;
+            s.retry_frame = texture_frame_no() + 600;
+            logf("vk: NVIDIA DLSS: out of video memory: the game's upscale until frame %llu, then try %d of %d",
+                 (unsigned long long)s.retry_frame, s.retries, kMemoryRetries);
+            return *fail = kNoMemory, 0;
+        }
         return *fail = "its feature was not made", -1;
     }
+    s.retries = 0, s.retry_frame = 0;
     s.feature_rw = max_w, s.feature_rh = max_h, s.feature_ow = ow, s.feature_oh = oh, s.min_rw = min_w, s.min_rh = min_h;
-    s.feature_preset = preset;
+    s.feature_preset = preset, s.feature_hdr = hdr;
     s.features_made++;
     logf("vk: NVIDIA DLSS: feature %llu made (%s; frame %llu, %.1f ms of CPU): %ux%u (%ux%u to %ux%u) -> %ux%u, mode %d, "
          "preset %c%s", (unsigned long long)s.features_made, why, (unsigned long long)texture_frame_no(), made_ms, rw, rh,

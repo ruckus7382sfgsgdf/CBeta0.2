@@ -395,6 +395,21 @@ bool create_device() {
     dev.eds3_clamp = dev.dynamic_state3 && eds3.extendedDynamicState3DepthClampEnable;
     dev.eds3_blend = dev.dynamic_state3 && eds3.extendedDynamicState3ColorBlendEnable &&
                      eds3.extendedDynamicState3ColorBlendEquation && eds3.extendedDynamicState3ColorWriteMask;
+    {   // (hookshot) the vendor and driver workarounds this device needs: vk_vendor.h, each forced by its RX_VK_ switch
+        VkPhysicalDeviceDriverProperties drv{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+        VkPhysicalDeviceProperties2 p2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+        p2.pNext = &drv;
+        vkGetPhysicalDeviceProperties2(dev.physical, &p2);
+        VendorFacts facts;
+        facts.vendor_id = p2.properties.vendorID;
+        facts.driver_id = drv.driverID;
+        facts.device_type = p2.properties.deviceType;
+        facts.driver_info = drv.driverInfo;
+        dev.fixes = vendor_fixes(facts);
+        vendor_fixes_env(dev.fixes, [](const char* name) -> const char* { return getenv(name); });
+        logf("vk: vendor fixes for %s (%s): out-of-bounds texel fetches 0 %d, NaN tests by bits %d, gather offset %d",
+             drv.driverName, drv.driverInfo, (int)dev.fixes.fetch_bounds, (int)dev.fixes.nan_bits, (int)dev.fixes.gather_offset);
+    }
     dev.eds3_a2c = dev.dynamic_state3 && eds3.extendedDynamicState3AlphaToCoverageEnable;
     dev.vk12 = f12;
     dev.vk13 = f13;
@@ -432,8 +447,13 @@ bool create_device() {
     if (dev.mesh_fallback) logf("vk: no mesh shaders: task and mesh programs run as compute shaders (issue 640 fallback)");
     bool task_mesh_fallback = false;
 #ifdef _WIN32
-    // Navi 22 can time out on task + mesh draws in the AMD Windows driver (issue 996).
-    task_mesh_fallback = dev.props.vendorID == 0x1002 && dev.props.deviceID == 0x73df;
+    // Navi 22 can time out on task + mesh draws in the AMD Windows driver (issue 996), and so can Navi 21: on an RX 6800 XT
+    // (driver 0x800161) the native path lost the device within minutes at Hyrule Castle's entrance, while the fallback played
+    // 25 minutes there with none. Navi 21 is 0x73bf (RX 6800, 6800 XT, 6900 XT), 0x73af (RX 6900 XT, XTXH boards) and 0x73a5
+    // (RX 6950 XT): the same chip on the same driver, not tested on their own. Navi 22 is 0x73df (RX 6700 XT)
+    task_mesh_fallback = dev.props.vendorID == 0x1002 &&
+                         (dev.props.deviceID == 0x73bf || dev.props.deviceID == 0x73af || dev.props.deviceID == 0x73a5 ||
+                          dev.props.deviceID == 0x73df);
 #endif
     if (const char* e = getenv("RX_VK_TASK_MESH_FALLBACK")) task_mesh_fallback = atoi(e) != 0;
     dev.task_mesh_fallback = task_mesh_fallback && dev.mesh_shader && f12.bufferDeviceAddress && !getenv("RX_VK_NO_MESH_FALLBACK");
@@ -894,7 +914,9 @@ void prepare_with_screen() {
         if (!prepare_stopped()) {
             prep_done.store(0), prep_total.store(0);
             prep_stage.store(2);
+            predict_plan_ensure();
             precompile_run(prep_progress);
+            predict_background();
         }
         if (prepare_stopped()) pipeline_cache_save(true);   // (the driver's part built so far, for the next start)
         else if (update) prepare_background();
@@ -1008,6 +1030,11 @@ void prepare_with_screen() {
 bool started_up() {
     if (const char* e = getenv("RX_VK_START_DELAY")) Sleep((DWORD)atoi(e) * 1000);   // (diagnosis: a long start, as the first one is)
     if (!replay_start()) return false;
+    // (Triforce, 11-13: vk_draw.cpp driver_fault_restart)
+    struct StartupWork {
+        StartupWork() { startup_work_on.store(true); }
+        ~StartupWork() { startup_work_on.store(false); }
+    } startup_work;
     if (prepare_only()) {
         // (three parts: the programs, the pipelines the notes predict, then those they name; most of the time is the first)
         static int part;
@@ -1028,7 +1055,9 @@ bool started_up() {
         part = 1;
         if (prepared) predict_run(progress);
         part = 2;
+        predict_plan_ensure();
         precompile_run(progress);
+        predict_background();
         pipeline_cache_save(true);
         remove(skipped_path().c_str());
         return true;
@@ -1089,8 +1118,10 @@ bool started_up() {
         };
         const bool update = prepare_is_update();   // (an update: what the notes name now, the rest in play)
         if (!update && prepare_run(progress, false)) predict_run(progress);
+        predict_plan_ensure();
         if (update) state_list_run();
         precompile_run(progress);
+        predict_background();
         if (update) prepare_background();
         if (console) CloseHandle(console), console = nullptr, FreeConsole();
     }

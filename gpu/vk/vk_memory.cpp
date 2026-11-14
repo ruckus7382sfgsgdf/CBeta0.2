@@ -65,6 +65,7 @@ struct Pool {
     uint64_t synced_epoch = 0;   // the submission that last brought it up to date
     uint64_t sync_seg = 0;       // (and the parallel replay's segment whose uploads did)
     uint64_t last_value = 0;     // (the newest submission that bound it: its mirror is in use until that one is done)
+    uint64_t imported_value = 0; // (Triforce: the recording being made when this import went into the table: imports_give_back)
     uint64_t direct_write_epoch = 0;   // (the part that last wrote it in guest memory, before it had a mirror)
     uint64_t retired_value = 0;  // (retired: the submission that may still use it)
     bool was_mirrored = false;   // (its mirror was given back: its pages stay in the captures, for the next one)
@@ -516,7 +517,10 @@ LONG WINAPI filter(EXCEPTION_POINTERS* info) {
     return prev_filter ? prev_filter(info) : EXCEPTION_CONTINUE_SEARCH;
 }
 void at_exit() {   // (the window closed, or any orderly exit: no verdict, the next session tries again)
-    if (active && !crashed.load() && state == TRYING) write(NEW, fails, "the last session ended before the trial was over");
+    if (active && !crashed.load() && state == TRYING) {
+        write(NEW, fails, "the last session ended before the trial was over");
+        state = NEW;   // (said once: the menu's exits say it before the process's own end does)
+    }
 }
 uint32_t vendor() {
     static const uint32_t v = getenv("RX_VK_TEST_VENDOR") ? (uint32_t)strtoul(getenv("RX_VK_TEST_VENDOR"), nullptr, 16) : dev.props.vendorID;
@@ -557,11 +561,25 @@ bool memory_trial_on() {
         write(TRYING, fails, "a session has it on");
         prev_filter = SetUnhandledExceptionFilter(filter);
         atexit(at_exit);
+#ifndef _WIN32
+        // (Triforce, 11-13) On Linux the game ends through _exit (host/posix ExitProcess) or, for the menu's Restart,
+        // through execve: neither runs atexit, so EVERY session shorter than the trial counted as one that "ended in a
+        // crash or without a word", and two short sessions or two restarts switched the newer memory handling off for
+        // good (a player's RX 9060 XT on RADV, v0.3.5: "menu: restart" twice, then "off"). ExitProcess ends through
+        // quick_exit now, which runs this; the menu's exits say it themselves (memory_trial_orderly_end)
+        at_quick_exit(at_exit);
+#endif
         logf("vk: the newer memory handling (mirrors in pieces, compacted textures) is on trial on this card (%d earlier session(s) "
              "ended badly); triforce_memtrial.txt keeps the result", fails);
         return true;
     }();
     return on;
+}
+/// (Triforce) The menu's Restart and Exit, before the window closes: an orderly end, no verdict (see at_quick_exit above)
+std::atomic<bool> startup_work_on{false};   // (vk_internal.h: the start's own shader work is running)
+void memory_trial_orderly_end() {
+    std::lock_guard lk(memtrial::mu);
+    memtrial::at_exit();
 }
 /// (texture_frame, every 600 presents) the trial passed once the game has played kTrialSeconds with it on
 void memory_trial_tick() {
@@ -2790,6 +2808,7 @@ void bg_drain() {
             continue;
         }
         if (imp != imported.end()) retire_pool(imp);
+        p.imported_value = mem_rec_value;
         imported.emplace(lo, p);
         guest_pages_set(p.lo, p.hi, p.address);
     }
@@ -2984,6 +3003,7 @@ Pool* pool_lookup(uint64_t guest, uint64_t size) {
             if (o != imported.end())   // (their mirrors' contents come with them)
                 p.gpu_only |= o->second.gpu_only, p.gpu_written |= o->second.gpu_written, retire_pool(o);
         }
+        p.imported_value = mem_rec_value;
         imp = imported.emplace(p.lo, p).first;
         guest_pages_set(p.lo, p.hi, p.address);
         if (chunk) prefetch_chunks(p.lo, p.hi, chunk);
@@ -4627,8 +4647,18 @@ void imports_give_back() {   // (pools_mu held)
     std::vector<std::map<uint64_t, Pool>::iterator> idle;
     for (auto it = imported.begin(); it != imported.end(); ++it) {
         const Pool& p = it->second;
+        // (Triforce, 11-13) An import counts as used from the recording it was made in. Its last_value is 0 until its first
+        // binding, which read as "idle since the session's start": with RAM short (this rule runs every 16 submissions then)
+        // an import the background thread had just made was given back before the binding that had asked for it came round
+        // again, which sent for it again, for good. A 16 GB player's log (RTX 4060, Hyrule Field): 1,400 imports given back
+        // (24 GB) in two minutes with 61 alive, every binding of theirs served from a copy meanwhile, 14-15 fps for those two
+        // minutes. The lab with 800 MB played as available (RX_VK_TEST_AVAIL_MB), 100 s standing there: 597 given back over
+        // 38 chunks, each 0 to 5 submissions after its import and never bound, 673 imports sent; with this 30 and 97.
+        // RX_VK_IMPORT_FRESH=0: as before
+        static const bool fresh = !(getenv("RX_VK_IMPORT_FRESH") && !atoi(getenv("RX_VK_IMPORT_FRESH")));
+        const uint64_t last_use = fresh ? std::max(p.last_value, p.imported_value) : p.last_value;
         if ((p.mstate == Pool::MIRROR_NONE || p.mstate == Pool::MIRROR_REFUSED) && p.last_value <= mem_completed &&
-            mem_rec_value > p.last_value + idle_for)
+            mem_rec_value > last_use + idle_for)
             idle.push_back(it);
     }
     std::sort(idle.begin(), idle.end(), [](auto a, auto b) { return a->second.last_value < b->second.last_value; });
@@ -4637,6 +4667,27 @@ void imports_give_back() {   // (pools_mu held)
     for (auto it : idle) {
         if (freed >= want) break;
         Pool& p = it->second;
+        {   // (lab, RX_VK_LOG_IMPORT_CHURN=1: what the imports given back were, every 64 of them)
+            static const bool churn_log = getenv("RX_VK_LOG_IMPORT_CHURN") != nullptr;
+            if (churn_log) {
+                static std::unordered_map<uint64_t, int> times;
+                static std::vector<uint64_t> ages, idles;
+                static int never, again, bg, total;
+                never += !p.last_value, again += times[p.lo]++ > 0, bg += p.prefetched, total++;
+                ages.push_back(mem_rec_value - p.imported_value);
+                idles.push_back(mem_rec_value - p.last_value);
+                if (ages.size() == 64) {
+                    std::sort(ages.begin(), ages.end()), std::sort(idles.begin(), idles.end());
+                    logf("vk: import churn: %d given back so far over %zu chunks; of the last 64: %d never bound since their "
+                         "import, %d given back before, %d made in the background and not bound; submissions since the import: "
+                         "min %llu median %llu max %llu; since the last binding: min %llu median %llu (now %llu, %s)",
+                         total, times.size(), never, again, bg, (unsigned long long)ages[0], (unsigned long long)ages[32],
+                         (unsigned long long)ages[63], (unsigned long long)idles[0], (unsigned long long)idles[32],
+                         (unsigned long long)mem_rec_value, by_heap ? "by the heap" : "by the RAM");
+                    ages.clear(), idles.clear(), never = again = bg = 0;
+                }
+            }
+        }
         guest_pages_set(p.lo, p.hi, 0);
         p.retired_value = mem_rec_value;   // (this submission's recording is being made: freed once it is done)
         freed += p.hi - p.lo;

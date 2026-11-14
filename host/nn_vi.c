@@ -211,6 +211,30 @@ static void scan_dt(long long presents) {
    1/15 s, as TotK Recomp's frame_rate.c (slower frames slow the game down, as on the console), at least 1/60 s (the game's
    own limit holds it at 60). HOS_REALTIME_STEP=0: the shipping whole steps. */
 extern volatile uint64_t hos_gfx_module;
+/* (local, RenoDX port) The scene's colour target as RGBA16F in place of the game's R11G11B10F (nx2/oot_patches.py: the format's
+   choice at main+0x65234c asks here; host/nn_applet.c gives the render targets' pool room for it): with the Insert menu's HDR
+   Native at the start, where RenoDX's shaders map the scene (gpu/vk/vk_renodx.cpp; RX_VK_RENODX=0 turns them off, and this with
+   them). Decided once, at the first ask, so the pool and the target agree. HOS_SCENE_RGBA16F=0 or 1 over it. */
+int hos_scene_rgba16f(void) {
+    static volatile LONG known = -1;
+    if (known < 0) {
+        const char *e = getenv("HOS_SCENE_RGBA16F"), *r = getenv("RX_VK_RENODX");
+        /* (the menu's saved choice, hdr=2: the first ask comes before the renderer has its swapchain, so it cannot be asked
+           whether the display took HDR10. On a display that did not, the game stays in SDR with the wider target) */
+        extern int hos_ini_option(const char *key, int otherwise);
+#ifdef HOOKSHOT_RENODX
+        /* (Triforce, 11-13: and the menu's RenoDX HDR row on, renodx_hdr=1, which is off unless chosen; RX_VK_RENODX=0 or 1
+           over the row, as in gpu/vk/vk_menu.cpp renodx_chosen) */
+        const LONG v = e ? atoi(e) != 0 : hos_ini_option("hdr", 0) == 2 && (r && *r ? atoi(r) != 0 : hos_ini_option("renodx_hdr", 0) == 1);
+#else   /* (a build without RenoDX's shaders, nx2/build.py HOOKSHOT_RENODX: nothing asks for the wider target) */
+        const LONG v = e ? atoi(e) != 0 : 0;
+        (void)r;
+#endif
+        if (InterlockedCompareExchange(&known, v, -1) == -1)
+            hos_log("vi: the scene's colour target: %s", v ? "RGBA16F (HDR Native at the start: for RenoDX's tone mapping)" : "the game's R11G11B10F");
+    }
+    return (int)known;
+}
 volatile int hos_fixed_resolution = 0;   /* (the lifted code reads these: nx2/oot_patches.py) */
 volatile uint32_t hos_fixed_scale_bits = 0x3f800000;   /* (HOS_RES_SCALE: the fixed path's scale) */
 volatile int hos_dynres_runs = 0;   /* (the dynamic path's frames: it fills fields the 3D reads, +8 +16 +168) */

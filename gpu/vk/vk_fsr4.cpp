@@ -101,6 +101,7 @@ struct Context {
     ffxCreateContextDescUpscale upscale{};
     ffxContext context = nullptr;
     uint32_t width = 0, height = 0;   // (its output, which is also the most the render size can be)
+    bool hdr = false;                 // (made for linear HDR colour: the other kind of colour makes it again)
     uint64_t memory = 0;              // (what AMD's library says it holds)
     ~Context() {
         if (context) lib().destroy(&context, nullptr);
@@ -243,7 +244,7 @@ bool load() {
 
 /// A context for outputs of w x h, any render size up to that (the game's dynamic resolution and the Render resolution row
 /// change it every so often: one context takes them all)
-std::shared_ptr<Context> make_context(uint32_t w, uint32_t h) {
+std::shared_ptr<Context> make_context(uint32_t w, uint32_t h, bool hdr) {
     Library& l = lib();
     auto c = std::make_shared<Context>();
     c->backend.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK;
@@ -265,6 +266,11 @@ std::shared_ptr<Context> make_context(uint32_t w, uint32_t h) {
     // (the chain's colour is tonemapped and square-root encoded already: LDR, perceptual, no auto exposure; depth not
     // inverted. The render size changes under the one context)
     c->upscale.flags = FFX_UPSCALE_ENABLE_NON_LINEAR_COLORSPACE | FFX_UPSCALE_ENABLE_DYNAMIC_RESOLUTION;
+    // (hdr, the chain before the game's bloom and tone mapping: the scene's linear HDR light, before the game's exposure,
+    // so FSR finds the exposure itself)
+    if (hdr)
+        c->upscale.flags = FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE | FFX_UPSCALE_ENABLE_AUTO_EXPOSURE |
+                           FFX_UPSCALE_ENABLE_DYNAMIC_RESOLUTION;
     c->upscale.maxRenderSize = {w, h};
     c->upscale.maxUpscaleSize = {w, h};
     c->upscale.fpMessage = &on_message;
@@ -276,7 +282,7 @@ std::shared_ptr<Context> make_context(uint32_t w, uint32_t h) {
         c->context = nullptr;
         return nullptr;
     }
-    c->width = w, c->height = h;
+    c->width = w, c->height = h, c->hdr = hdr;
     FfxApiEffectMemoryUsage usage{};
     ffxQueryDescUpscaleGetGPUMemoryUsage mem{};
     mem.header.type = FFX_API_QUERY_DESC_TYPE_UPSCALE_GPU_MEMORY_USAGE;
@@ -285,8 +291,8 @@ std::shared_ptr<Context> make_context(uint32_t w, uint32_t h) {
     ffxQueryGetProviderVersion provider{};
     provider.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
     const bool known = l.query(&c->context, &provider.header) == FFX_API_RETURN_OK && provider.versionName;
-    logf("vk: AMD FSR 4: FSR %s made for outputs of %ux%u (frame %llu, %.1f ms of CPU; its own %llu MB)",
-         known ? provider.versionName : "?", w, h, (unsigned long long)texture_frame_no(), made_ms,
+    logf("vk: AMD FSR 4: FSR %s made for outputs of %ux%u, %s colour (frame %llu, %.1f ms of CPU; its own %llu MB)",
+         known ? provider.versionName : "?", w, h, hdr ? "HDR" : "LDR", (unsigned long long)texture_frame_no(), made_ms,
          (unsigned long long)(c->memory >> 20));
     return c;
 }
@@ -354,12 +360,13 @@ void release() {
     s.context.reset();
 }
 
-int prepare(VkCommandBuffer, uint32_t rw, uint32_t rh, uint32_t ow, uint32_t oh, uint32_t* in_w, uint32_t* in_h, const char** why) {
+int prepare(VkCommandBuffer, uint32_t rw, uint32_t rh, uint32_t ow, uint32_t oh, bool hdr,
+            uint32_t* in_w, uint32_t* in_h, const char** why) {
     State& s = st();
     int made = 1;
-    if (!s.context || s.context->width != ow || s.context->height != oh) {
+    if (!s.context || s.context->width != ow || s.context->height != oh || s.context->hdr != hdr) {
         release();
-        s.context = make_context(ow, oh);
+        s.context = make_context(ow, oh, hdr);
         if (!s.context) return *why = "its upscaler was not made", -1;
         s.in_w = s.in_h = 0;
         made = 2;
@@ -411,7 +418,7 @@ bool evaluate(VkCommandBuffer cmd, const TemporalFrame& f) {
     d.reset = f.reset;
     d.cameraNear = f.near_z, d.cameraFar = f.far_z, d.cameraFovAngleVertical = f.fov_y;
     d.viewSpaceToMetersFactor = 1.0f;
-    d.flags = FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_SRGB;
+    d.flags = s.context->hdr ? 0 : FFX_UPSCALE_FLAG_NON_LINEAR_COLOR_SRGB;   // (HDR: linear light as it is)
     ::mkwvk::rec::boundary(::mkwvk::rec::B_DIRECT);   // (ffxDispatch records into cmd itself: what this thread recorded through vk_work.h reaches cmd first)
     const ffxReturnCode_t r = l.dispatch(&s.context->context, &d.header);
     note_work();   // (AMD's dispatches: full_barrier must not take the next barrier for a repeat of the one before them)

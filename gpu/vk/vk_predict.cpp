@@ -91,7 +91,34 @@ std::vector<Class> candidates(const Seen* exact, const Seen* sig) {
 
 } // namespace
 
-std::vector<std::unique_ptr<PipeNote>> predict_pipelines(const std::vector<std::unique_ptr<PipeNote>>& notes, size_t* programs) {
+namespace {
+std::unique_ptr<PipeNote> predicted_note(const PipeNote& V, const PipeNote& O, uint64_t prog, uint64_t variant) {
+    auto n = std::make_unique<PipeNote>(O);
+    std::memcpy(n->s.vattr, V.s.vattr, sizeof n->s.vattr);
+    n->s.nvattr = V.s.nvattr;
+    std::memcpy(n->s.vstream, V.s.vstream, sizeof n->s.vstream);
+    n->topo = V.topo;
+    n->prog = prog, n->variant = variant;
+    n->key = 0;
+    return n;
+}
+}   // namespace
+
+std::vector<std::unique_ptr<PipeNote>> predict_rebuild(const std::vector<std::unique_ptr<PipeNote>>& notes,
+                                                       const std::vector<PredictPlan>& plan) {
+    std::unordered_map<uint64_t, const PipeNote*> by_key;
+    for (const auto& n : notes) by_key.emplace(n->key, n.get());
+    std::vector<std::unique_ptr<PipeNote>> out;
+    for (const PredictPlan& p : plan) {
+        const auto v = by_key.find(p.vertex_note), o = by_key.find(p.output_note);
+        if (v == by_key.end() || o == by_key.end()) continue;   // (a note gone since: that pipeline is not predicted)
+        out.push_back(predicted_note(*v->second, *o->second, p.prog, p.variant));
+    }
+    return out;
+}
+
+std::vector<std::unique_ptr<PipeNote>> predict_pipelines(const std::vector<std::unique_ptr<PipeNote>>& notes, size_t* programs,
+                                                         std::vector<PredictPlan>* plan) {
     std::unordered_map<std::pair<uint64_t, uint64_t>, Face, PairHash> faces;
     program_cache_each([&](const KeptProgram& k) {
         Face f;
@@ -131,14 +158,9 @@ std::vector<std::unique_ptr<PipeNote>> predict_pipelines(const std::vector<std::
         for (const Class& v : vc)
             for (const Class& o : oc) {
                 const PipeNote& V = *vdonor.at(v);
-                auto n = std::make_unique<PipeNote>(*odonor.at(o));
-                std::memcpy(n->s.vattr, V.s.vattr, sizeof n->s.vattr);
-                n->s.nvattr = V.s.nvattr;
-                std::memcpy(n->s.vstream, V.s.vstream, sizeof n->s.vstream);
-                n->topo = V.topo;
-                n->prog = pv.first, n->variant = pv.second;
-                n->key = 0;
-                out.push_back(std::move(n));
+                const PipeNote& O = *odonor.at(o);
+                if (plan) plan->push_back({pv.first, pv.second, V.key, O.key});
+                out.push_back(predicted_note(V, O, pv.first, pv.second));
             }
     }
     return out;

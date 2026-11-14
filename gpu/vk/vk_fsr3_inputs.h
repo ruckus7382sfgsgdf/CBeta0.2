@@ -54,7 +54,8 @@ bool is_scene(const Texture* in);
 /// At the gameplay upscale's dispatch: its input as the network samples it (in, in_view), this frame's camera and depth into
 /// FSR's inputs (shaders/fsr3_prep.comp). False when they cannot be made (no camera this frame, another size, ...): the
 /// reason is logged when it changes
-bool prepare(VkCommandBuffer cmd, Texture* in, VkImageView in_view, Frame& out);
+/// linear: in is the scene's colour target itself, linear HDR light (FSR before the game's bloom and tone mapping)
+bool prepare(VkCommandBuffer cmd, Texture* in, VkImageView in_view, Frame& out, bool linear = false);
 
 /// The frame prepare made last, for frame interpolation at the present, once: false when none was made since the last take
 /// (or it is older than the frame before), so a present never interpolates with another frame's depth and motion

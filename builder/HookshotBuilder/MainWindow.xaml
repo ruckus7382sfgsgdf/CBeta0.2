@@ -189,6 +189,12 @@
                       Content="AMD FSR 4 (AMD's files are not included: see the readme)"/>
             <TextBlock Style="{StaticResource Note}" FontSize="12" Margin="26,4,0,0" TextWrapping="Wrap"
                        Text="For AMD Radeon graphics cards. It is chosen in the game's Insert menu, as the Upscaler."/>
+            <!-- RenoDX's HDR: off unless ticked. Its shaders and the Slang compiler are downloaded and compiled by the build
+                 (make_game.py's renodx switch, scripts/renodx_shaders.py): never part of the builder or its downloads -->
+            <CheckBox x:Name="RenodxTick" Style="{StaticResource Tick}" IsChecked="False" Margin="0,10,0,0"
+                      Content="RenoDX HDR (downloads RenoDX's shaders and the Slang compiler, about 60 MB)"/>
+            <TextBlock Style="{StaticResource Note}" FontSize="12" Margin="26,4,0,0" TextWrapping="Wrap"
+                       Text="For HDR displays: RenoDX's tone mapping with the Insert menu's HDR set to Native. Its shaders stay on this PC: never share a game folder built with them."/>
           </StackPanel>
 
           </Grid>

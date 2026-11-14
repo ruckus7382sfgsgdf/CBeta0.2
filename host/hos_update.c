@@ -27,9 +27,12 @@ static int safe_tag(const char *s) {
 #include <stdlib.h>
 #include <string.h>
 
-#define UPDATE_HOST L"api.github.com"
-#define UPDATE_PATH L"/repos/ruckus7382sfgsgdf/CBeta0.2/releases?per_page=1"   /* (the newest, pre-releases too: /latest skips them) */
-#define RELEASES_PAGE L"https://github.com/ruckus7382sfgsgdf/CBeta0.2/releases"
+/* (11-13: Triforce's own home, as setup/Setup.cs Program.ReleaseApi: the release list of triforce/downloads on its Forgejo,
+   asked on the main domain. Up to v0.3.5: api.github.com, /repos/ruckus7382sfgsgdf/CBeta0.2/releases?per_page=1. The Linux
+   lines below ask the same list) */
+#define UPDATE_HOST L"triforceproject.com"
+#define UPDATE_PATH L"/api/v1/repos/triforce/downloads/releases?limit=1"   /* (the newest, pre-releases too) */
+#define RELEASES_PAGE L"https://triforceproject.com"
 
 /* (a line "name=value" of a small text file, in UTF-8: its value, trimmed) */
 static int read_value(const wchar_t *path, const char *name, char *out, size_t cap) {
@@ -54,7 +57,7 @@ static int read_value(const wchar_t *path, const char *name, char *out, size_t c
     return found;
 }
 
-/* (the latest release's tag, from GitHub's API: "tag_name":"...") */
+/* (the latest release's tag, from the release list (Forgejo's, GitHub's before): "tag_name":"...") */
 static int latest_tag(char *tag, size_t cap) {
     int ok = 0;
     HINTERNET s = WinHttpOpen(L"Triforce-update-check", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
@@ -228,12 +231,15 @@ static int pipe_tag(const char *cmd, char *tag, size_t cap) {
 }
 
 static int latest_tag(char *tag, size_t cap) {
-    if (pipe_tag("curl -fsSL --max-time 4 --retry 2 -A Triforce-update-check "
-                 "-H \"Accept: application/vnd.github+json\" "
-                 "https://api.github.com/repos/ruckus7382sfgsgdf/CBeta0.2/releases/latest 2>/dev/null", tag, cap))
+    /* (11-13: Triforce's own home, as on Windows above: the newest release of triforce/downloads, pre-releases too. The list
+       of one release starts {"id":..,"tag_name":"..": pipe_tag finds the tag in its first bytes. The second address is the
+       same list asked of the Forgejo itself, should the main domain not pass it on. Up to v0.3.5 this asked GitHub's
+       /releases/latest, which skips pre-releases, and every Triforce release is one: no Linux game was ever told of an update) */
+    if (pipe_tag("curl -fsSL --max-time 4 --retry 2 -A Triforce-update-check -H \"Accept: application/json\" "
+                 "\"https://triforceproject.com/api/v1/repos/triforce/downloads/releases?limit=1\" 2>/dev/null", tag, cap))
         return 1;
-    return pipe_tag("curl -fsSL --max-time 8 --retry 2 -A Triforce-update-check "
-                    "https://github.com/ruckus7382sfgsgdf/CBeta0.2/releases/latest/download/triforce-linux.txt 2>/dev/null", tag, cap);
+    return pipe_tag("curl -fsSL --max-time 8 --retry 2 -A Triforce-update-check -H \"Accept: application/json\" "
+                    "\"https://git.triforceproject.com/api/v1/repos/triforce/downloads/releases?limit=1\" 2>/dev/null", tag, cap);
 }
 
 /* the builder an update installed (builder/linux/linux_update.py): <data>/triforce/builder/versions/<current>/AppRun. The
@@ -305,7 +311,7 @@ void hos_update_check(void) {
     if (strncmp(answer, "Update", 6)) return;
     if (!has_builder) {
         if (fork() == 0) {
-            execlp("xdg-open", "xdg-open", "https://github.com/ruckus7382sfgsgdf/CBeta0.2/releases", (char *)0);
+            execlp("xdg-open", "xdg-open", "https://triforceproject.com", (char *)0);
             _exit(127);
         }
         return;

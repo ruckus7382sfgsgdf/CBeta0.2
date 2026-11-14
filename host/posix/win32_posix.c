@@ -405,9 +405,11 @@ void ExitThread(DWORD code) {
     pthread_exit(NULL);
 }
 void ExitProcess(UINT code) {
-    /* (at once, as Windows ends the other threads first: exit() would run static destructors under running threads) */
+    /* (at once, as Windows ends the other threads first: exit() would run static destructors under running threads.
+       quick_exit, not _exit: it runs what was registered with at_quick_exit and nothing else, and the renderer's
+       library registers its orderly-end marks there, as a DLL's atexit runs at Windows' ExitProcess) */
     fflush(NULL);
-    _exit((int)code);
+    quick_exit((int)code);
 }
 BOOL TerminateProcess(HANDLE p, UINT code) { (void)p; ExitProcess(code); }
 

@@ -363,6 +363,7 @@ struct Info {
     bool uses_rescaling_uniform{};
     bool uses_cbuf_indirect{};
     bool uses_render_area{};
+    bool captures_position{};   ///< (hookshot) RuntimeInfo::capture_position, emitted: CAPTURE_PUSH_OFFSET is read
 
     IR::Type used_constant_buffer_types{};
     IR::Type used_storage_buffer_types{};
@@ -420,13 +421,14 @@ enum class HandleOp : u32 {
     Select, ///< condition, true value, false value
     Tee,    ///< slot: keeps the top value in the slot (shared subexpressions)
     Load,   ///< slot: the value kept there
+    Index,  ///< (hookshot) the array element being evaluated (a handle table read in a loop: one texture an element)
 };
 
 /// Runs a handle program; read_cbuf(index, offset) and read_storage(binding, offset) return the
 /// words it reads. Returns nothing for a malformed program.
 template <typename ReadCbuf, typename ReadStorage>
 std::optional<u32> EvaluateHandleProgram(std::span<const u32> code, ReadCbuf&& read_cbuf,
-                                         ReadStorage&& read_storage) {
+                                         ReadStorage&& read_storage, u32 element = 0) {
     std::array<u32, 64> stack{};
     std::array<u32, 256> slots{};
     size_t size = 0;
@@ -459,6 +461,10 @@ std::optional<u32> EvaluateHandleProgram(std::span<const u32> code, ReadCbuf&& r
         if (op == HandleOp::Neg || op == HandleOp::Not || op == HandleOp::LNot) {
             const u32 a = pop();
             push(op == HandleOp::Neg ? 0U - a : op == HandleOp::Not ? ~a : (a == 0 ? 1U : 0U));
+            continue;
+        }
+        if (op == HandleOp::Index) {
+            push(element);
             continue;
         }
         if (op == HandleOp::Tee) {

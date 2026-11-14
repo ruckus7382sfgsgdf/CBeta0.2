@@ -8,7 +8,14 @@
 //    frame before's, from the camera's two matrices, its jitter taken off). Only the camera's motion: what moves by itself gets
 //    the motion of what is behind it, until vk_dlss.cpp's actor motion draws the skinned draws' own over it (dlss_actor.vert). pc.flags bit 0: motion (none on the first frame);
 //    bit 1: the motion shown as the colour instead (RX_VK_DLSS_DEBUG=motion); bit 2: only that, from the motion image as it is
-//    then (after vk_dlss.cpp's actor motion drew into it: dlss_actor.vert)
+//    then (after vk_dlss.cpp's actor motion drew into it: dlss_actor.vert); bit 3 with bit 2 (RX_VK_DLSS_DEBUG=characters):
+//    grey, and blue where shaders/dlss_actor.frag marked a draw's own motion (x under -20000, y how far it is from the
+//    camera's: brighter up to 8 px), the motion then none
+// (local, RenoDX port) -DHDR (dlss_prep_hdr_comp_spv.h), for an RGBA16F scene whose values pass 1: the colour is the input
+// squared, linear HDR with nothing clamped at 1, which DLSS takes as HDR colour.
+// pc.flags bit 4 (the upscaler before the game's bloom and tone mapping, vk_temporal.cpp temporal_pre_tonemap; the plain
+// pass, whichever format the scene's target has): the scene is its colour target itself, linear HDR light: taken as it
+// is, nothing clamped at 1, and the engine told it is HDR.
 // The game's clip space: depth from -1 to 1 (NVN's default), y up, the picture's rows top down.
 layout(local_size_x = 8, local_size_y = 8) in;
 layout(binding = 0) uniform sampler2D scene;
@@ -29,11 +36,24 @@ void main() {
     const vec2 uv = (vec2(g) + 0.5) / size;
     if ((pc.flags & 4) != 0) {
         const vec2 m = imageLoad(motion, g).xy;
+        if ((pc.flags & 8) != 0) {
+            const vec3 c = m.x < -20000.0 ? mix(vec3(0.02, 0.10, 0.45), vec3(0.15, 0.45, 1.0), clamp(m.y / 8.0, 0.0, 1.0))
+                                          : vec3(0.18);
+            imageStore(color, g, vec4(c, 1.0));
+            imageStore(motion, g, vec4(0.0));
+            return;
+        }
         imageStore(color, g, vec4(clamp(abs(m) / 16.0, 0.0, 1.0), textureLod(scene_depth, uv, 0.0).r, 1.0));
         return;
     }
     const vec3 c = textureLod(scene, uv, 0.0).rgb;
-    imageStore(color, g, vec4(clamp(c, 0.0, 1.0), 1.0));
+#ifdef HDR
+    const vec3 root = max(c, vec3(0.0));
+    imageStore(color, g, vec4(root * root, 1.0));
+#else
+    // (min, max: a NaN in the scene goes no further, max of it and 0 being 0)
+    imageStore(color, g, vec4((pc.flags & 16) != 0 ? min(max(c, vec3(0.0)), vec3(64000.0)) : clamp(c, 0.0, 1.0), 1.0));
+#endif
     const float d = textureLod(scene_depth, uv, 0.0).r;
     imageStore(depth, g, vec4(d));
     vec2 mv = vec2(0.0);

@@ -775,12 +775,17 @@
             <TextBox x:Name="OutPath" Style="{StaticResource Path}"/>
             <Button x:Name="BrowseD" Grid.Column="1" Style="{StaticResource Quiet}" Height="38" Margin="8,0,0,0"/>
           </Grid>
+          <!-- (11-13) NVIDIA DLSS: off unless ticked; ticking asks for NVIDIA's license first (Shell.cs DlssTick) -->
+          <CheckBox x:Name="DlssTick" Style="{StaticResource Tick}" Margin="0,14,0,0"
+                    Content="NVIDIA DLSS for RTX cards (downloads NVIDIA's DLSS files, about 60 MB)"/>
         </StackPanel>
 
         <Grid Grid.Row="3">
-          <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+          <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
           <TextBlock x:Name="SpaceText" Style="{StaticResource Small}" VerticalAlignment="Center" Margin="0,0,20,0"/>
-          <Button x:Name="BuildButton" Grid.Column="1" Style="{StaticResource Primary}" IsEnabled="False"/>
+          <!-- (11-13: back to the page this one was opened from, when there is a game to go back to) -->
+          <Button x:Name="SetupBack" Grid.Column="1" Style="{StaticResource Quiet}" Height="44" Margin="0,0,12,0" Visibility="Collapsed"/>
+          <Button x:Name="BuildButton" Grid.Column="2" Style="{StaticResource Primary}" IsEnabled="False"/>
         </Grid>
       </Grid>
 

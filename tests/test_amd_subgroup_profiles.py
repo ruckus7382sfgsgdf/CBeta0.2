@@ -33,6 +33,7 @@ constexpr uint32_t VK_DRIVER_ID_AMD_PROPRIETARY = 1;
 struct {
     uint32_t sg32_stages = 0, subgroup_size = 32, subgroup_max = 32, driver_id = 0;
     struct { struct { uint64_t minStorageBufferOffsetAlignment = 16; } limits; } props;
+    struct { bool gather_offset = false; } fixes;   // (vk_vendor.h: make_profile reads the gather offset from it)
 } dev;
 
 using Shader::Stage;

@@ -361,6 +361,10 @@ static void live_input(void) {
                 if (!strncmp(line, "!flasharm", 9)) rx_flash_dark_arm();
                 extern volatile int hos_oot_live_action;   /* host/hos_main.c: "!cheat <action>", as the Cheats page sends */
                 if (!strncmp(line, "!cheat ", 7)) __atomic_store_n(&hos_oot_live_action, atoi(line + 7), __ATOMIC_RELAXED);
+                void hos_oot_live_crawl(const char *line);   /* host/hos_main.c: "!banc", "!pos", "!hold", "!where" (the pipeline crawl) */
+                if (!strncmp(line, "!banc ", 6) || !strncmp(line, "!give ", 6) || !strncmp(line, "!items", 6) || !strncmp(line, "!pos ", 5) || !strncmp(line, "!hold ", 6) ||
+                    !strncmp(line, "!where", 6))
+                    hos_oot_live_crawl(line);
                 hos_log("hid: live command at %.1f s: %.*s", at / 1000.0, (int)(n > 1 ? n - 1 : 0), line);
                 continue;
             }

@@ -110,6 +110,7 @@ class ShaderStampCacheTests(unittest.TestCase):
             "NGX_SDK": ngx,   # ("": no NVIDIA NGX SDK, vk_dlss.cpp built without DLSS, as by default)
             "NGX_MSVC_RT": "vk_ngx_msvc_rt.cpp",
             "FSR": fsr,   # (HOOKSHOT_FSR=1: vk_fsr4.cpp built with AMD FSR 4)
+            "RENODX": "",   # (no HOOKSHOT_RENODX: vk_renodx.cpp built without RenoDX's shaders, as by default)
         }
         with mock.patch.dict(os.environ, {"RX_RELEASE": "1"} if release else {}, clear=True), warnings.catch_warnings():
             # The production key/header helpers use short-lived open(...).read() expressions.

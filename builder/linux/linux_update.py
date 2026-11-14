@@ -23,11 +23,14 @@ import zipfile
 from part_links import SYSROOT_PART, is_absolute_link, relative_sysroot_link
 
 LIST_NAME = "triforce-linux.txt"
-REPO = "ruckus7382sfgsgdf/CBeta0.2"   # (Triforce's releases)
-LATEST_LIST = "https://github.com/%s/releases/latest/download/%s" % (REPO, LIST_NAME)
+# (11-13: Triforce's own home. Releases are in triforce/downloads on its Forgejo: the list is asked on the main domain,
+# which passes /api/v1 on; a release's files are the Forgejo's own links. Up to v0.3.5: github.com/ruckus7382sfgsgdf/CBeta0.2)
+HOME_API = "https://triforceproject.com/api/v1/repos/triforce/downloads"
+DOWNLOADS = "https://git.triforceproject.com/triforce/downloads"
+LATEST_LIST = "%s/releases/latest/download/%s" % (DOWNLOADS, LIST_NAME)
 # (Triforce: the newest release, pre-releases too, as the Windows side asks: /releases/latest skips pre-releases, and
 # every Triforce release so far is one. The answer is a list of one release)
-LATEST_API = "https://api.github.com/repos/%s/releases?per_page=1" % REPO
+LATEST_API = HOME_API + "/releases?limit=1"
 # (the game folder's names, nx2/make_game.py's; Hookshot's after them, for a folder that still has those)
 GAME_NAMES = ("triforce", "hookshot")
 VERSION_FILES = ("triforce_version.txt", "hookshot_version.txt")
@@ -551,7 +554,7 @@ def fetch_manifest(get=None):
             body = body[0] if body else {}
         tag = body.get("tag_name") or ""
         if tag and all(ch.isalnum() or ch in "._-" for ch in tag):
-            url = "https://github.com/%s/releases/download/%s/%s" % (REPO, tag, LIST_NAME)
+            url = "%s/releases/download/%s/%s" % (DOWNLOADS, tag, LIST_NAME)
             return parse_list(get(url).decode("utf-8"), local=False)
     except Exception:
         pass

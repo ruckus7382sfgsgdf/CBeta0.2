@@ -369,6 +369,8 @@ public:
     bool need_input_position_indirect{};
     Id input_position{};
     std::array<InputGenericInfo, 32> input_generics{};
+    /// Screen-linear fragment inputs read through perspective interpolation, times FragCoord.w.
+    std::array<bool, 32> noperspective_as_smooth_inputs{};
 
     Id output_point_size{};
     Id output_position{};
@@ -429,6 +431,13 @@ public:
     u32 mesh_fallback_payload_member_index{};
     u32 mesh_fallback_records_member_index{};
     u32 mesh_fallback_indirect_input_member_index{};
+    /// (hookshot) RuntimeInfo::capture_position: the push block's capture members, the vertex index and a vec4 pointer type
+    bool wants_capture{};
+    u32 capture_address_member_index{};
+    u32 capture_first_member_index{};
+    u32 capture_count_member_index{};
+    Id capture_vertex_index{};
+    Id capture_pointer{};
     /// A pointer to the u32 at a PhysicalStorageBuffer device address
     Id MeshFallbackWord(Id address);
 

@@ -64,6 +64,13 @@ bool fsr3_wanted();
 /// way). With FSR 3.1's frame interpolation on, the dispatch's input and this frame's camera become its inputs here
 /// (vk_fsr3_inputs.h) whichever upscaler runs. true: FSR 3.1 wrote the output (the dispatch is left out); false: the network
 /// (or DLSS) runs, the reason logged when it changes
+/// FSR 3.1 before the game's bloom and tone mapping (vk_temporal.h temporal_pre_tonemap, which calls this at the bloom's
+/// first pass): its inputs from the scene's colour target (linear HDR light) and its passes, at ow x oh. *picture: its
+/// picture, linear HDR at that size, which the chain writes back into the scene and the tone mapping draws from. Not
+/// with FSR's frame interpolation on (fsr3_pre_wanted), whose inputs are made at the upscale's dispatch
+bool fsr3_pre_wanted();
+bool fsr3_pre(VkCommandBuffer cmd, Texture* scene, VkImageView scene_view, uint32_t ow, uint32_t oh, VkImageView* picture);
+
 bool fsr3_upscale(VkCommandBuffer cmd, uint64_t key, bool known, Texture* in, VkImageView in_view, Texture* out,
                   VkImageView out_view, uint32_t out_level);
 

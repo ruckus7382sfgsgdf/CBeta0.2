@@ -147,7 +147,10 @@ uint64_t hos_rt_pool_size(uint64_t game) {
     const uint64_t scaled = px > 2560 * 1440 ? (game * px / (2560 * 1440) + 0xfffff) & ~0xfffffULL : game;
     const uint64_t minimum = 512ULL << 20, five_k = 900ULL << 20;
     const int is_five_k = hos_output_size(0) == 5120 && hos_output_size(1) == 2880;
-    const uint64_t v = e ? strtoull(e, NULL, 0) << 20 : scaled < minimum ? minimum : is_five_k && scaled > five_k ? five_k : scaled;
+    extern int hos_scene_rgba16f(void);
+    /* (local, RenoDX port) the scene's colour target at 8 bytes a pixel in place of 4: room for it and its copies, at 3840 x 2160 33 MB each */
+    const uint64_t rgba16f = hos_scene_rgba16f() ? 128ULL << 20 : 0;
+    const uint64_t v = (e ? strtoull(e, NULL, 0) << 20 : scaled < minimum ? minimum : is_five_k && scaled > five_k ? five_k : scaled) + (e ? 0 : rgba16f);
     static int logged;
     if (!logged++) hos_log("applet: render target pool %llu MB (the game's %llu MB)", (unsigned long long)(v >> 20), (unsigned long long)(game >> 20));
     return v;

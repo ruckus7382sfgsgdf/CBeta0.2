@@ -225,6 +225,10 @@ static int setup(char *dir, size_t cap, int *face) {
             ok = GetFileAttributesA(path) != INVALID_FILE_ATTRIBUTES;
         }
         if (ok) f = choose_face(d);
+        /* (v0.3.5 shipped tools whose Python lacked nx2/prompt_requirements.txt: no folder was made, the Button prompts
+           setting did nothing, and the log said nothing of it) */
+        else hos_log("prompts: no prompts folder beside the game: the game's own icons, whatever Button prompts is set to "
+                     "(Setup's Update makes them)");
         InterlockedExchange(&setup_state, ok ? 2 : 3);
     }
     while (setup_state == 1) Sleep(1);

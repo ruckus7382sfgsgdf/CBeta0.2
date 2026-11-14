@@ -524,6 +524,12 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     if (runtime_info.mesh_fallback || runtime_info.mesh_fallback_vertex) {
         wants_mesh_fallback = true;   // (before any DefineRescalingInputPushConstant, which is made once)
     }
+    // (hookshot) a scene vertex stage's position capture: its members go in the one push block, so decided before it is made.
+    // Not with the render area's block (a second push block; full-screen passes, never the scene's geometry)
+    if (runtime_info.capture_position && stage == Stage::VertexB && !runtime_info.mesh_fallback_vertex &&
+        profile.unified_descriptor_binding && profile.support_int64 && !program.info.uses_render_area) {
+        wants_capture = true;
+    }
     DefineCommonTypes(program.info);
     DefineCommonConstants();
     DefineInterfaces(program);
@@ -576,6 +582,21 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
         mesh_info = program.mesh;
         DefineRescalingInputPushConstant();
     }
+    if (wants_capture) {   // (the store itself: EmitEpilogue, emit_spirv_special.cpp)
+        if (!Sirit::ValidId(U64)) {
+            AddCapability(spv::Capability::Int64);
+            U64 = Name(TypeInt(64, false), "u64");
+        }
+        AddCapability(spv::Capability::PhysicalStorageBufferAddresses);
+        AddExtension("SPV_KHR_physical_storage_buffer");
+        SetMemoryModel(spv::AddressingModel::PhysicalStorageBuffer64, spv::MemoryModel::GLSL450);
+        // (Vulkan's VertexIndex, base vertex included: the redraw draws the same indices with the same base)
+        capture_vertex_index = Sirit::ValidId(vertex_index)
+                                   ? vertex_index
+                                   : DefineInput(*this, U32[1], true, spv::BuiltIn::VertexIndex);
+        capture_pointer = TypePointer(spv::StorageClass::PhysicalStorageBuffer, F32[4]);
+        program.info.captures_position = true;
+    }
     DefineMesh(program);
     DefineLocalMemory(program);
     DefineSharedMemory(program);
@@ -592,6 +613,13 @@ EmitContext::EmitContext(const Profile& profile_, const RuntimeInfo& runtime_inf
     DefineGlobalMemoryFunctions(program.info);
     DefineRescalingInput(program.info);
     DefineRenderArea(program.info);
+    // (the capture's push block, when nothing above made it. Not made before them: the block is made once, with the members
+    // wanted by then, and DefineGlobalMemoryFunctions asks for the page table's (wants_guest_pages) only as it runs. Made
+    // earlier, the block had no such member, the stage read the table's address from member 0, and the GPU was lost at the
+    // first frame in play)
+    if (wants_capture) {
+        DefineRescalingInputPushConstant();
+    }
 }
 
 EmitContext::~EmitContext() = default;
@@ -1603,6 +1631,14 @@ void EmitContext::DefineRescalingInputPushConstant() {
             mesh_fallback_indirect_input_member_index = member_index++;
         }
     }
+    if (wants_capture) {
+        members.push_back(U64);
+        capture_address_member_index = member_index++;
+        members.push_back(U32[1]);
+        capture_first_member_index = member_index++;
+        members.push_back(U32[1]);
+        capture_count_member_index = member_index++;
+    }
     const Id push_constant_struct{TypeStruct(std::span(members.data(), members.size()))};
     Decorate(push_constant_struct, spv::Decoration::Block);
     Name(push_constant_struct, "ResolutionInfo");
@@ -1640,6 +1676,14 @@ void EmitContext::DefineRescalingInputPushConstant() {
             MemberDecorate(push_constant_struct, mesh_fallback_indirect_input_member_index, spv::Decoration::Offset,
                            MESH_FALLBACK_INDIRECT_INPUT_PUSH_OFFSET);
         }
+    }
+    if (wants_capture) {
+        MemberDecorate(push_constant_struct, capture_address_member_index, spv::Decoration::Offset, CAPTURE_PUSH_OFFSET);
+        MemberDecorate(push_constant_struct, capture_first_member_index, spv::Decoration::Offset, CAPTURE_FIRST_PUSH_OFFSET);
+        MemberDecorate(push_constant_struct, capture_count_member_index, spv::Decoration::Offset, CAPTURE_COUNT_PUSH_OFFSET);
+        MemberName(push_constant_struct, capture_address_member_index, "capture_address");
+        MemberName(push_constant_struct, capture_first_member_index, "capture_first");
+        MemberName(push_constant_struct, capture_count_member_index, "capture_count");
     }
     const Id pointer_type{TypePointer(spv::StorageClass::PushConstant, push_constant_struct)};
     rescaling_push_constants = AddGlobalVariable(pointer_type, spv::StorageClass::PushConstant);
@@ -2017,6 +2061,12 @@ void EmitContext::DefineImages(const Info& info, u32& binding, u32& scaling_inde
 void EmitContext::DefineInputs(const IR::Program& program) {
     const Info& info{program.info};
     const VaryingState loads{info.loads.mask | info.passthrough.mask};
+    const bool noperspective_as_smooth{
+        stage == Stage::Fragment && runtime_info.scaled_noperspective_inputs &&
+        std::ranges::any_of(info.interpolation,
+                            [](Interpolation mode) {
+                                return mode == Interpolation::NoPerspective;
+                            })};
 
     if (info.uses_workgroup_id) {
         workgroup_id = DefineInput(*this, U32[3], false, spv::BuiltIn::WorkgroupId);
@@ -2084,7 +2134,8 @@ void EmitContext::DefineInputs(const IR::Program& program) {
         layer = DefineInput(*this, U32[1], false, spv::BuiltIn::Layer);
         Decorate(layer, spv::Decoration::Flat);
     }
-    if (loads.AnyComponent(IR::Attribute::PositionX)) {
+    if (loads.AnyComponent(IR::Attribute::PositionX) ||
+        info.passthrough.AnyComponent(IR::Attribute::PositionX) || noperspective_as_smooth) {
         const bool is_fragment{stage == Stage::Fragment};
         if (!is_fragment && profile.has_broken_spirv_position_input) {
             need_input_position_indirect = true;
@@ -2189,7 +2240,12 @@ void EmitContext::DefineInputs(const IR::Program& program) {
             case Interpolation::Smooth:
                 break;
             case Interpolation::NoPerspective:
-                Decorate(id, spv::Decoration::NoPerspective);
+                // The previous stage may write it times Position.w (noperspective_outputs).
+                if (!runtime_info.scaled_noperspective_inputs) {
+                    Decorate(id, spv::Decoration::NoPerspective);
+                } else {
+                    noperspective_as_smooth_inputs[index] = true;
+                }
                 break;
             case Interpolation::Flat:
                 Decorate(id, spv::Decoration::Flat);

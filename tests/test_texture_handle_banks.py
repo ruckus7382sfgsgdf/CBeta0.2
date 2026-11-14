@@ -62,7 +62,7 @@ int recorded_reads=0,live_reads=0,vm_reads=0;
 void ub_read(uint64_t addr,void* out,size_t n) { ++recorded_reads; std::memcpy(out,recorded+addr-4096,n); }
 struct Host { void gpu_read(uint64_t addr,void* out,size_t n) { ++live_reads; std::memcpy(out,live_bytes+addr-4096,n); } } host_object;
 Host* host=&host_object;
-uint32_t stage_handle(const NvnState&,const Stage&,uint32_t program) { ++vm_reads; return 0xABC000U+program; }
+uint32_t stage_handle(const NvnState&,const Stage&,uint32_t program,uint32_t element=0) { ++vm_reads; return 0xABC000U+program+0x1000U*element; }
 '''
     checks = r'''
 int main() {
@@ -102,7 +102,7 @@ int main() {
  st.nvn_stage=-1; all(3,0,0,"invalid user stage"); st.nvn_stage=2;
  t={}; i={}; t.handle_program=i.handle_program=3;
  const int before=recorded_reads+live_reads;
- eq(handle_of(s,st,t,9),0xABC003,"VM array bypass");
+ eq(handle_of(s,st,t,9),0xABC003+0x9000,"VM array element 9 (a handle table: its record)");
  eq(descriptor_handle(s,st,t),0xABC003,"VM texture bypass");
  eq(descriptor_handle(s,st,i),0xABC003,"VM image bypass");
  eq(vm_reads,3,"VM call count"); eq(recorded_reads+live_reads,before,"VM no ordinary reads");

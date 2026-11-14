@@ -18,6 +18,7 @@
 
 #include "vk_fsr3.h"
 #include "vk_fsr3_inputs.h"
+#include "vk_fsr3fi.h"   // (frames_wanted: not before the bloom with frame interpolation on)
 #include "vk_draw.h"      // (descriptors_disturbed)
 #include "vk_gprof.h"     // (RX_VK_PASS_TIMING: a span per pass, so the report names them)
 #include "vk_menu.h"
@@ -719,7 +720,7 @@ bool make_out_pipeline() {
     li.flags = VK_DESCRIPTOR_SET_LAYOUT_CREATE_PUSH_DESCRIPTOR_BIT_KHR;
     li.bindingCount = 2, li.pBindings = b;
     if (vkCreateDescriptorSetLayout(dev.device, &li, nullptr, &o.set) != VK_SUCCESS) return false;
-    const VkPushConstantRange pr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 8};
+    const VkPushConstantRange pr{VK_SHADER_STAGE_COMPUTE_BIT, 0, 12};   // (dlss_out.comp's size and linear)
     VkPipelineLayoutCreateInfo pi{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     pi.setLayoutCount = 1, pi.pSetLayouts = &o.set, pi.pushConstantRangeCount = 1, pi.pPushConstantRanges = &pr;
     if (vkCreatePipelineLayout(dev.device, &pi, nullptr, &o.layout) != VK_SUCCESS) return false;
@@ -761,16 +762,61 @@ bool fsr3_wanted() {
     return (env > 0 || (opts.dlss == upscaler_rows::FSR3 && !temporal_env_chosen())) && fsr3::supported();
 }
 
+bool fsr3_pre_wanted() { return fsr3_wanted() && fsr3fi::frames_wanted() == 0; }
+
+bool fsr3_pre(VkCommandBuffer cmd, Texture* scene, VkImageView scene_view, uint32_t ow, uint32_t oh, VkImageView* picture) {
+    if (!fsr3_pre_wanted() || !scene || !scene_view) return false;
+    fsr3_inputs::Frame f;
+    if (!fsr3_inputs::prepare(cmd, scene, scene_view, f, true)) return fail("its inputs could not be made");
+    Out& o = out_state();
+    std::lock_guard lk(o.mu);
+    if (ow < f.width || oh < f.height) return fail("unexpected output");
+    fsr3::Inputs ai;
+    ai.color = f.color, ai.depth = f.depth, ai.motion = f.motion;
+    ai.render_width = f.width, ai.render_height = f.height;
+    ai.upscale_width = ow, ai.upscale_height = oh;
+    ai.jitter[0] = f.jitter[0], ai.jitter[1] = f.jitter[1];
+    ai.jitter_phases = fsr3_inputs::jitter_size(2) ? fsr3_inputs::jitter_size(2) : 8;
+    ai.camera = f.camera;
+    ai.frame_time_ms = f.frame_ms;
+    ai.reset = f.reset;
+    if (!fsr3::upscale(cmd, ai)) return fail("its passes could not be recorded");
+    fsr3_inputs::upscaled(f.width, f.height, ow, oh);
+    if (++o.drawn % 600 == 0)
+        logf("vk: fsr3: %llu frames drawn, %ux%u -> %ux%u before the bloom, this one's jitter %+.3f %+.3f px of %u phases",
+             (unsigned long long)o.drawn, f.width, f.height, ow, oh, f.jitter[0], f.jitter[1], ai.jitter_phases);
+    if (o.reason) logf("vk: fsr3: FSR 3.1 draws the upscale again (frame %llu)", (unsigned long long)f.frame);
+    o.reason = nullptr;
+    static bool told;
+    if (!told)
+        told = true, logf("vk: fsr3 %ux%u -> %ux%u before the game's bloom and tone mapping, from the scene's linear HDR colour "
+                          "(jitter %+.3f %+.3f px, %u phases)", f.width, f.height, ow, oh, f.jitter[0], f.jitter[1],
+                          ai.jitter_phases);
+    *picture = fsr3::output_view();
+    return true;
+}
+
 bool fsr3_upscale(VkCommandBuffer cmd, uint64_t key, bool known, Texture* in, VkImageView in_view, Texture* out,
                   VkImageView out_view, uint32_t out_level) {
     const bool upscaling = fsr3_wanted();
     if (!upscaling && !fsr3_inputs::wanted()) return false;
     if (!in || !in_view || !out || !out_view) return false;
+    // (FSR drew before the game's bloom and tone mapping this frame, into this dispatch's input: the tone mapped picture is in
+    // the output, or copied there (vk_temporal.cpp). Asked before the scene's camera is, which that pass took)
+    if (upscaling && temporal_pre_dispatch(cmd, in, in_view, out, out_view, out_level, false)) return true;
+    // (local, RenoDX port) an RGBA16F picture: FSR's own passes at this dispatch do not take it, but before the bloom they do
+    // (the scene's target keeps the game's format), and the dispatch above then has the picture. So in a frame they did not
+    // draw there, the point is learnt here for the next, and the game's upscale runs this once
+    if (upscaling && in->format == VK_FORMAT_R16G16B16A16_SFLOAT && out->format == VK_FORMAT_R16G16B16A16_SFLOAT &&
+        temporal_scene_format(in->format) && (out->width >> out_level) >= in->width && fsr3_inputs::is_scene(in))
+        return temporal_pre_dispatch(cmd, in, in_view, out, out_view, out_level, true);
     // (another network of the upscale's shape, as temporal_upscale takes them: only the scene into the picture. The gameplay
     // networks sample the scene's B10G11R11 colour and write the B10G11R11 picture)
     if (!known && (in->format != VK_FORMAT_B10G11R11_UFLOAT_PACK32 || out->format != VK_FORMAT_B10G11R11_UFLOAT_PACK32 ||
                    (out->width >> out_level) <= in->width || !fsr3_inputs::is_scene(in)))
         return false;
+    // (it did not: the point learnt for the next frame)
+    if (upscaling && temporal_pre_dispatch(cmd, in, in_view, out, out_view, out_level, true)) return true;
     fsr3_inputs::Frame f;
     if (!fsr3_inputs::prepare(cmd, in, in_view, f)) return upscaling ? fail("its inputs could not be made") : false;
     if (!upscaling) return false;   // (frame interpolation's inputs alone: the network or DLSS upscales)
@@ -793,7 +839,7 @@ bool fsr3_upscale(VkCommandBuffer cmd, uint64_t key, bool known, Texture* in, Vk
     ai.reset = f.reset;
     if (!fsr3::upscale(cmd, ai)) return fail("its passes could not be recorded");
     {
-        const int32_t pc[2] = {(int32_t)ow, (int32_t)oh};
+        const int32_t pc[3] = {(int32_t)ow, (int32_t)oh, 0};
         const VkDescriptorImageInfo info[2] = {{o.point, fsr3::output_view(), VK_IMAGE_LAYOUT_GENERAL},
                                                {VK_NULL_HANDLE, out_view, VK_IMAGE_LAYOUT_GENERAL}};
         VkWriteDescriptorSet w[2]{{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}, {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}};

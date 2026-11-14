@@ -25,6 +25,7 @@
 #include <string.h>
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <math.h>
 
 #define MIC_MAGIC 0x4D494349u   /* "MICI": the high word of our handle in the game's InputStreamType */
 #define MAX_STREAMS 4
@@ -184,7 +185,9 @@ static void lost(Source *src, int64_t now, const char *why) {
     missed(src, now, why);
 }
 /* the wanted microphone opened; a named one that cannot be: the default stands in */
+static const char *mic_test_file(void);
 static void connect(Source *src) {
+    if (mic_test_file()) return;   /* (lab, HOS_MIC_TEST: no device, the test sound below) */
     const int64_t now = hos_now_ns();
     if (src->mode <= 0) {
         close_mic(src, now);
@@ -231,10 +234,64 @@ static void choose(Source *src) {
     if (mode <= 0) hos_log("audio in: the microphone is off in the menu: silence");
     connect(src);
 }
+/* (lab, 11-13) HOS_MIC_TEST=<file>: no microphone is opened; what the game hears is what that file says, read again
+   every half second, so a run can go from silence to sound and back: "0" (or no file) silence, "noise <amp>" white
+   noise, "tone <hz> <amp>" a hummed note with a little noise on it (amp 0..1 of full scale; 16-bit streams only).
+   For the report of fps falling "as soon as the mic picks up noise": measured in the lab without a microphone */
+static const char *mic_test_file(void) {
+    static const char *f;
+    static int read_it;
+    if (!read_it) f = getenv("HOS_MIC_TEST"), read_it = 1;
+    return f && *f ? f : NULL;
+}
+static void test_push(Source *src, int frames) {
+    static int kind;            /* 0 silence, 1 noise, 2 tone */
+    static double hz, amp, phase;
+    static uint32_t seed = 0x1234567u;
+    static int64_t next_read;
+    const int64_t now = hos_now_ns();
+    if (now >= next_read) {
+        char line[64] = "";
+        next_read = now + 500000000LL;
+        FILE *f = fopen(mic_test_file(), "r");
+        if (f) {
+            if (!fgets(line, sizeof line, f)) line[0] = 0;
+            fclose(f);
+        }
+        int k = 0;
+        double a = 0, h = 0;
+        if (sscanf(line, "noise %lf", &a) == 1) k = 1;
+        else if (sscanf(line, "tone %lf %lf", &h, &a) == 2) k = 2;
+        if (k != kind || a != amp || h != hz) hos_log("audio in: test microphone: %s", k ? line : "silence");
+        kind = k, amp = a, hz = h;
+    }
+    if (!kind || src->format != FMT_PCM16) {
+        push_all(src, NULL, frames * src->frame_bytes);
+        return;
+    }
+    int16_t buf[1024];
+    const int ch = src->channels > 0 ? src->channels : 1;
+    while (frames > 0) {
+        const int n = frames < 1024 / ch ? frames : 1024 / ch;
+        for (int i = 0; i < n; i++) {
+            seed = seed * 1664525u + 1013904223u;
+            const double noise = ((int32_t)(seed >> 8) % 20001 - 10000) / 10000.0;   /* (-1..1) */
+            double v = kind == 1 ? noise * amp : (sin(phase) + noise * 0.02) * amp;
+            phase += 6.283185307179586 * hz / (double)src->rate;
+            if (phase > 6.283185307179586) phase -= 6.283185307179586;
+            if (v > 1) v = 1;
+            if (v < -1) v = -1;
+            for (int c = 0; c < ch; c++) buf[i * ch + c] = (int16_t)(v * 32767.0);
+        }
+        push_all(src, (const uint8_t *)buf, n * src->frame_bytes);
+        frames -= n;
+    }
+}
+
 /* what the source has recorded since, into its streams: the microphone's, or silence at the rate when there is none */
 static void pump(Source *src) {
     const int64_t now = hos_now_ns();
-    if (src->mode > 0 && (!src->mic || src->standin) && now >= src->retry_ns) connect(src);   /* (the wanted one again) */
+    if (!mic_test_file() && src->mode > 0 && (!src->mic || src->standin) && now >= src->retry_ns) connect(src);   /* (the wanted one again) */
     if (src->mode == 2 && src->mic && !src->standin && now >= src->check_ns) {   /* (still plugged in?) */
         uint32_t id;
         src->check_ns = now + CHECK_NS;
@@ -281,7 +338,10 @@ static void pump(Source *src) {
         src->silence_from_ns += secs * 1000000000LL, src->silence_made -= secs * src->rate;
     }
     if (due > src->rate) due = src->rate;   /* (more than a second is past every stream's capacity anyway) */
-    if (due > 0) push_all(src, NULL, (int)due * src->frame_bytes);
+    if (due > 0) {
+        if (mic_test_file()) test_push(src, (int)due);
+        else push_all(src, NULL, (int)due * src->frame_bytes);
+    }
 }
 static void pump_all(void) {
     for (int i = 0; i < MAX_STREAMS; i++)

@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/ruckus7382sfgsgdf/CBeta0.2/releases"><img src="https://img.shields.io/badge/Download-Triforce%20Setup-D4A72C?style=for-the-badge&labelColor=111111" alt="Download Triforce Setup"></a>
+  <a href="https://triforceproject.com"><img src="https://img.shields.io/badge/Download-Triforce%20Setup-D4A72C?style=for-the-badge&labelColor=111111" alt="Download Triforce Setup"></a>
   <img src="https://img.shields.io/badge/Windows-10%20%7C%2011-D4A72C?style=for-the-badge&labelColor=111111" alt="Windows 10 | 11">
   <img src="https://img.shields.io/badge/Renderer-Vulkan%201.3-1E62E8?style=for-the-badge&labelColor=111111" alt="Vulkan 1.3">
   <img src="https://img.shields.io/badge/Recompiled-No%20emulator-2FAA3A?style=for-the-badge&labelColor=111111" alt="No emulator">
@@ -80,7 +80,7 @@ itself is assembled on your PC, from your copy, in one guided build.
 
 ### Four steps to Hyrule
 
-**1 · Download.** Get **`TriforceSetup.exe`** from the [newest release](https://github.com/ruckus7382sfgsgdf/CBeta0.2/releases)
+**1 · Download.** Get **`TriforceSetup.exe`** from the [newest release](https://triforceproject.com)
 and run it.
 
 **2 · Install.** Choose where Triforce goes (your own user folder by default, so no administrator prompt) and whether
@@ -261,6 +261,8 @@ style and what a good pull request looks like.
 - **sostenesfreitas (ocarina-recomp):** an early README layout, and notes that confirmed the mesh stage's control
   section.
 - **MythosOfs (Orchid):** the original fog and exposure workaround for Ocarina of Time.
+- **Carlos Lopez (clshortfuse) and [RenoDX](https://github.com/clshortfuse/renodx):** the HDR tone mapping, eye
+  adaptation and colour grading of the optional RenoDX HDR build, from RenoDX's mod for Ocarina of Time.
 - **Mesa (NAK):** the map of Ampere's instruction encoding.
 - **Everyone who sent fixes:** SkippySteve (a great many of them), klimovich008, d3zessete, chrispository, vzeol,
   monsterlag, leonidasmark, Segmentree, Zorkats, ShyVortex, hiKareeem, gab9281, i900gaming and more.
@@ -277,6 +279,10 @@ Parts of Triforce come from other GPL projects (NotRexed's recompiler, Eden, suy
 GPL. Bundled components with their own GPL-compatible licenses (Sirit, Vulkan Memory Allocator, SDL, Opus, stb, zbic
 and the a64-kit tools) keep their notices in their own folders. Triforce Setup's tools package also carries Python and
 llvm-mingw, under their own licenses.
+
+The optional RenoDX HDR support is worked from RenoDX, which is under the MIT license: its notice is in
+[third_party/renodx/LICENSE.md](third_party/renodx/LICENSE.md). RenoDX's own shaders are never part of Triforce: a
+build that asks for them downloads and compiles them on the builder's PC.
 
 <sub>Triforce is a fan-made project with no connection to Nintendo, and Nintendo hasn't endorsed it. The Legend of
 Zelda and Ocarina of Time are Nintendo's trademarks.</sub>

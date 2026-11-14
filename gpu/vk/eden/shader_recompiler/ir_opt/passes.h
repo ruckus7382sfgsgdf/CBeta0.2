@@ -6,6 +6,7 @@
 
 #pragma once
 
+#include <string>
 #include "shader_recompiler/environment.h"
 #include "shader_recompiler/frontend/ir/program.h"
 
@@ -31,6 +32,11 @@ void SsaRewritePass(IR::Program& program);
 void PositionPass(Environment& env, IR::Program& program);
 void BlitConstantsPass(Environment& env, IR::Program& program);
 void TexturePass(Environment& env, IR::Program& program, const HostTranslateInfo& host_info);
+/// (hookshot) The texture handles of the last translation on this thread that no handle program could follow (they take
+/// the first constant buffer word on their path): how many, and the operations the programs stopped at. Resets them.
+u32 TakeHandleFallbacks(std::string& stopped_at);
+/// (Triforce) The texture handles of the last translation on this thread that were given a handle table. Resets them.
+u32 TakeHandleTables();
 void LayerPass(IR::Program& program, const HostTranslateInfo& host_info);
 void VendorWorkaroundPass(IR::Program& program);
 void VerificationPass(const IR::Program& program);
