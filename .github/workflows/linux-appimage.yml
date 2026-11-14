@@ -9,6 +9,13 @@ on:
     tags: ['*']
   pull_request:
   workflow_dispatch:
+    inputs:
+      # (a build that replaces a release's Linux file names that release: a game built from it compares its version with
+      # the latest release's tag by name (host/hos_update.c), and git describe's v0.3.6-1-g... would be told of v0.3.6)
+      version:
+        description: "The version the AppImage names itself (empty: git describe's)"
+        required: false
+        default: ''
 permissions:
   contents: read
 concurrency:
@@ -95,6 +102,8 @@ jobs:
           ls -la work work/image
 
       - name: AppImage
+        env:
+          HOOKSHOT_VERSION: ${{ inputs.version }}   # (empty but for a started run that names one: appimage.sh asks git then)
         run: scripts/linux/appimage.sh
 
       # (AMD FSR 4's Linux side, a build option the AppImage leaves off (gpu/vk/vk_fsr4.cpp: dlopen, the older backend

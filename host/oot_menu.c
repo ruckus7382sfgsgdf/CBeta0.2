@@ -13,7 +13,15 @@
    and hands it to the focus manager (*(screen+32)+96, its vtable +48), when the manager takes the player's input.
    HOS_MENU_TRACE=1: the focus changes, the screens and what the mouse does logged. */
 #include "hos.h"
-#if defined(_WIN32)
+/* (Triforce) The game's own Options screen (the layout SystemOption_00; the title's Options and the pause menu's are the one
+   screen), by its vtable (HOS_MENU_TRACE in a headless run, 2026-11-10: the screen of 15 entries that starts to run when
+   Options is chosen, from the title and from the pause menu alike, and stops with Back; L and R do nothing on it). While
+   it runs the renderer is told each frame (rx_option_set HOS_OPT_GAME_OPTIONS): the menu draws its tabs over this
+   screen's header, the game's own list the first of them (gpu/vk/vk_menu.cpp), and nn_hid.c passes Back on when one of
+   our tabs is left with it. HOS_OPTIONS_TABS=0 keeps the renderer untold */
+#define OPTIONS_SCREEN_VTABLE 0x84c0f108ULL
+void rx_option_set(int id, int value);   /* rx_backend.c */
+#if defined(_WIN32) && !defined(HOS_OOT_MENU_NO_MOUSE)   /* (the macro: tests/test_oot_menu_mouse.py builds the other half on Windows) */
 #include <windows.h>
 #include <ctype.h>
 #include <stdio.h>
@@ -231,15 +239,7 @@ static int panel_page(uint64_t screen) { return panel_page_vt(peek64(screen)); }
    search of memory, in Lord Jabu-Jabu's Belly): +0x1368 the floor chosen (2F 1, 1F 0, B1 -1), +0x136c how
    many floors, +0x1370 the lowest; the top is the lowest + the count - 1. Kept as the screens are seen */
 #define HUD_SCREEN_VTABLE 0x84c08300ULL
-/* (Triforce) The game's own Options screen (the layout SystemOption_00; the title's Options and the pause menu's are the one
-   screen), by its vtable (HOS_MENU_TRACE in a headless run, 2026-11-10: the screen of 15 entries that starts to run when
-   Options is chosen, from the title and from the pause menu alike, and stops with Back; L and R do nothing on it). While
-   it runs the renderer is told each frame (rx_option_set HOS_OPT_GAME_OPTIONS): the menu draws its tabs over this
-   screen's header, the game's own list the first of them (gpu/vk/vk_menu.cpp), and nn_hid.c passes Back on when one of
-   our tabs is left with it. HOS_OPTIONS_TABS=0 keeps the renderer untold */
-#define OPTIONS_SCREEN_VTABLE 0x84c0f108ULL
 static volatile LONG64 options_seen_ns;
-void rx_option_set(int id, int value);   /* rx_backend.c */
 int hos_oot_options_front(void) {
     const LONG64 t = InterlockedCompareExchange64(&options_seen_ns, 0, 0);
     return t && (LONG64)hos_now_ns() - t < 200000000LL;
@@ -836,7 +836,32 @@ void hos_oot_menu_tick(Ctx *c, uint64_t screen) {
     if (screen == pause_screen_now()) InterlockedIncrement(&ticks);
 }
 #else
+/* Not Windows: the mouse in the game's menus is the Windows window's (display.c), not here. The game's own Options
+   screen is named all the same, each frame it runs, so the options' tabs sit in it as on Windows: they are the only way
+   to our options since the keys that opened them over the game went (gpu/vk/vk_menu.cpp overlay_allowed), and with this
+   left out a Linux build had none at all (2026-11-14). The screen is the one whose update the lifted game is running
+   (nx2/oot_patches.py patch_menu_tick), so its first word, the vtable, is there to read */
+#include <stdlib.h>
+#include <string.h>
+#include "../gpu/vk/vk_api.h"   /* (HOS_OPT_GAME_OPTIONS) */
+static int64_t options_seen_ns;   /* (the screens' updates run on several of the game's threads: read and written whole) */
 void hos_oot_menu_focus(Ctx *c, uint64_t screen, uint64_t pane, uint64_t lr) { (void)c, (void)screen, (void)pane, (void)lr; }
-void hos_oot_menu_tick(Ctx *c, uint64_t screen) { (void)c, (void)screen; }
-int hos_oot_options_front(void) { return 0; }
+void hos_oot_menu_tick(Ctx *c, uint64_t screen) {
+    (void)c;
+    uint64_t vt = 0;
+    if (screen < 0x100000 || screen >= HOS_GUEST_SPACE - 8) return;
+    memcpy(&vt, GP(screen), 8);
+    if (vt != OPTIONS_SCREEN_VTABLE) return;
+    static int tabs = -1;
+    if (tabs < 0) {
+        const char *e = getenv("HOS_OPTIONS_TABS");
+        tabs = !(e && *e == '0');
+    }
+    __atomic_store_n(&options_seen_ns, hos_now_ns(), __ATOMIC_RELAXED);
+    if (tabs) rx_option_set(HOS_OPT_GAME_OPTIONS, 1);
+}
+int hos_oot_options_front(void) {
+    const int64_t t = __atomic_load_n(&options_seen_ns, __ATOMIC_RELAXED);
+    return t && hos_now_ns() - t < 200000000LL;
+}
 #endif

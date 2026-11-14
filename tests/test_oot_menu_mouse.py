@@ -47,6 +47,7 @@ int64_t hos_now_ns(void);
 VK_API_H = r"""
 #pragma once
 enum { HOS_MOUSE_LEFT = 1, HOS_MOUSE_RIGHT = 2, HOS_MOUSE_MIDDLE = 4 };
+enum { HOS_OPT_GAME_OPTIONS = 48 };
 """
 
 FIXTURE = r"""
@@ -72,6 +73,7 @@ static int pointer_hidden;   /* (the cursor hidden while the pad is in use: the 
 static int menu_frees, menu_gone;   /* (the game's menus' mouse: freed for a menu's frame; their close told) */
 void hos_mouse_game_menu(void) { menu_frees++; }
 void hos_mouse_game_menu_gone(void) { menu_gone++; }
+void rx_option_set(int id, int value) { (void)id, (void)value; }   /* (the Options screen named: the renderer's) */
 int hos_mouse_wheel_take(void) { const int w = wheel_next; wheel_next = 0; return w; }   /* (the wheel only, mouse kept) */
 int hos_mouse_game_pointer(int *x, int *y, int *w, int *h, uint32_t *pressed, int *wheel) {
     *x = ptr_x, *y = ptr_y, *w = 3840, *h = 2160, *pressed = pressed_next, *wheel = wheel_next;
@@ -297,6 +299,87 @@ int main(void) {
     return fails != 0;
 }
 """
+
+
+# The game's own Options screen named for the renderer (its tabs sit in it): every system's, the mouse or not. On Windows
+# the file's other half is compiled for this (HOS_OOT_MENU_NO_MOUSE), which is the half Linux gets
+OPTIONS_FIXTURE = r"""
+#include "hos.h"
+#include "../gpu/vk/vk_api.h"
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+uint8_t *fake_heap;
+static int64_t now_ns = 1000000000;
+int64_t hos_now_ns(void) { return now_ns; }
+void hos_log(const char *fmt, ...) { (void)fmt; }
+static int told, told_id, told_value;
+void rx_option_set(int id, int value) { told++, told_id = id, told_value = value; }
+void hos_oot_menu_focus(Ctx *c, uint64_t screen, uint64_t pane, uint64_t lr);
+void hos_oot_menu_tick(Ctx *c, uint64_t screen);
+int hos_oot_options_front(void);
+static int fails;
+#define CHECK(x) do { if (!(x)) { printf("FAIL line %d: %s\n", __LINE__, #x); fails++; } } while (0)
+int main(void) {
+    fake_heap = calloc(1, 4 << 20);
+    Ctx ctx;
+    memset(&ctx, 0, sizeof ctx);
+    const uint64_t options = FAKE_BASE + 0x1000, other = FAKE_BASE + 0x2000;
+    const uint64_t options_vt = 0x84c0f108ULL, other_vt = 0x84c0bc18ULL;
+    memcpy(GP(options), &options_vt, 8);
+    memcpy(GP(other), &other_vt, 8);
+    CHECK(!hos_oot_options_front());
+    hos_oot_menu_tick(&ctx, 0);       /* (no screen) */
+    hos_oot_menu_tick(&ctx, 8);       /* (not a guest address) */
+    hos_oot_menu_tick(&ctx, HOS_GUEST_SPACE - 4);   /* (its vtable would end past the guest's space) */
+    hos_oot_menu_tick(&ctx, other);   /* (another screen: the pause menu's vtable) */
+    hos_oot_menu_focus(&ctx, other, other + 64, 0);
+    CHECK(told == 0 && !hos_oot_options_front());
+    hos_oot_menu_tick(&ctx, options);
+    CHECK(told == 1 && told_id == HOS_OPT_GAME_OPTIONS && told_value == 1);
+    CHECK(hos_oot_options_front());
+    now_ns += 100000000;   /* (0.1 s on, no frame of it between: still in front) */
+    CHECK(hos_oot_options_front());
+    hos_oot_menu_tick(&ctx, options);
+    CHECK(told == 2);
+    now_ns += 300000000;   /* (0.3 s with none: closed) */
+    hos_oot_menu_tick(&ctx, other);
+    CHECK(told == 2 && !hos_oot_options_front());
+    /* (the screen's memory is another screen's later: its vtable as it is now) */
+    memcpy(GP(options), &other_vt, 8);
+    hos_oot_menu_tick(&ctx, options);
+    CHECK(told == 2 && !hos_oot_options_front());
+    if (!fails) printf("PASS\n");
+    return fails != 0;
+}
+"""
+
+
+class OotOptionsScreenTests(unittest.TestCase):
+    def test_names_the_options_screen_without_the_mouse(self):
+        compiler = shutil.which("gcc") or shutil.which("clang")
+        if not compiler:
+            self.skipTest("no C compiler")
+        with tempfile.TemporaryDirectory(prefix="hookshot-oot-options-") as tmp:
+            tmp = Path(tmp)
+            (tmp / "host").mkdir()
+            (tmp / "gpu" / "vk").mkdir(parents=True)
+            (tmp / "host" / "hos.h").write_text(HOS_H, encoding="utf-8")
+            (tmp / "gpu" / "vk" / "vk_api.h").write_text(VK_API_H, encoding="utf-8")
+            shutil.copy(ROOT / "host" / "oot_menu.c", tmp / "host" / "oot_menu.c")
+            (tmp / "host" / "t.c").write_text(OPTIONS_FIXTURE, encoding="utf-8")
+            binary = tmp / "t.exe"
+            other_half = ["-DHOS_OOT_MENU_NO_MOUSE"] if sys.platform == "win32" else []
+            build = subprocess.run([compiler, "-std=gnu11", "-Wall", "-O1", "-g", str(tmp / "host" / "t.c")] +
+                                   ["-c", "-o", str(tmp / "t.o")], text=True, capture_output=True)
+            self.assertEqual(build.returncode, 0, build.stderr)
+            build = subprocess.run([compiler, "-std=gnu11", "-Wall", "-O1", "-g"] + other_half +
+                                   ["-c", str(tmp / "host" / "oot_menu.c"), "-o", str(tmp / "m.o")], text=True, capture_output=True)
+            self.assertEqual(build.returncode, 0, build.stderr)
+            build = subprocess.run([compiler, str(tmp / "t.o"), str(tmp / "m.o"), "-o", str(binary)], text=True, capture_output=True)
+            self.assertEqual(build.returncode, 0, build.stderr)
+            run = subprocess.run([str(binary)], text=True, capture_output=True, timeout=30)
+            self.assertEqual(run.returncode, 0, run.stdout + run.stderr)
 
 
 class OotMenuMouseTests(unittest.TestCase):
